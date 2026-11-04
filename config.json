@@ -9,5 +9,8 @@
     "video_mode": "file",
     "photo_mode": "file"
   },
-  "sites": []
+  "sites": [],
+  "registered_chats": [
+    6701042883
+  ]
 }
