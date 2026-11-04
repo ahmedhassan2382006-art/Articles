@@ -40,7 +40,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== قراءة التوكنات بذكاء وتفادي الأخطاء ====================
+# ==================== قراءة التوكنات بذكاء ====================
 SECRET_RAW = (
     os.environ.get("BOT_SECRET")
     or os.environ.get("3bot")
@@ -51,7 +51,6 @@ SECRET_RAW = (
 BOT_TOKEN = None
 GITHUB_TOKEN = None
 
-# فحص الفاصل تلقائياً سواء كان \ أو / أو سطر جديد
 for sep in ["\\", "/", "\n", "|"]:
     if sep in SECRET_RAW:
         parts = SECRET_RAW.split(sep, 1)
@@ -72,6 +71,15 @@ CONFIG_FILE_PATH = "config.json"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{CONFIG_FILE_PATH}"
 
 MAX_TELEGRAM_FILE_SIZE = 49 * 1024 * 1024
+
+# ترويسات المتصفح لتخطي جدران حماية Cloudflare والحظر في المواقع
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+}
 
 # ==================== مزامنة GitHub API لملف config.json ====================
 GITHUB_FILE_SHA = None
@@ -115,7 +123,6 @@ def get_remote_config():
 
 def save_remote_config(new_config: dict):
     global GITHUB_FILE_SHA
-    # حفظ محلي دائماً كاحتياط
     try:
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(new_config, f, ensure_ascii=False, indent=2)
@@ -149,7 +156,44 @@ def save_remote_config(new_config: dict):
 
 CONFIG = get_remote_config()
 
-# ==================== أدوات معالجة المقالات والنصوص ====================
+# ==================== فحص الـ RSS المطور (تخطي الحظر) ====================
+def parse_feed_robust(url: str):
+    """جلب الخلاصات عبر محاكاة متصفح لتفادي حظر Cloudflare"""
+    url = url.strip()
+    
+    # محاولة جلب المحتوى أولاً بـ User-Agent كامل
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=12, allow_redirects=True)
+        if resp.status_code == 200 and resp.content:
+            feed = feedparser.parse(resp.content)
+            if feed.entries or len(feed.feed) > 0:
+                return feed, url
+    except Exception:
+        pass
+
+    # محاولة feedparser المباشرة كبديل
+    try:
+        feed = feedparser.parse(url)
+        if feed.entries or len(feed.feed) > 0:
+            return feed, url
+    except Exception:
+        pass
+
+    # تجربة تلقائية للمسارات الشهيرة إذا كتب المستخدم رابط الموقع بدون /feed
+    if not any(url.endswith(x) for x in ("/feed", "/feed/", "/rss", ".xml")):
+        for suffix in ["/feed", "/feed/", "/rss"]:
+            test_url = url.rstrip("/") + suffix
+            try:
+                resp = requests.get(test_url, headers=BROWSER_HEADERS, timeout=8)
+                if resp.status_code == 200:
+                    feed = feedparser.parse(resp.content)
+                    if feed.entries:
+                        return feed, test_url
+            except Exception:
+                continue
+
+    return None, url
+
 def parse_date(entry):
     for f in ('published', 'updated', 'pubDate'):
         raw = entry.get(f)
@@ -175,7 +219,7 @@ def extract_article_text(entry, link: str) -> str:
 
     if link:
         try:
-            r = requests.get(link, timeout=7, headers={"User-Agent": "Mozilla/5.0"})
+            r = requests.get(link, timeout=7, headers=BROWSER_HEADERS)
             if r.status_code == 200:
                 soup = BeautifulSoup(r.content, "html.parser")
                 for s in soup(["script", "style", "nav", "header", "footer"]):
@@ -187,7 +231,7 @@ def extract_article_text(entry, link: str) -> str:
             pass
     return "نص الموضوع متاح عبر الرابط المرفق."
 
-# ==================== تنزيل الفيديوهات وتقطيعها عبر FFmpeg ====================
+# ==================== تنزيل الفيديوهات وتقطيعها ====================
 YTDL_BASE_OPTS = {
     "quiet": True,
     "no_warnings": True,
@@ -250,7 +294,7 @@ def split_video_ffmpeg(filepath: str, max_chunk_bytes: int = MAX_TELEGRAM_FILE_S
 
     return parts if parts else [filepath]
 
-# ==================== لوحة المفاتيح التفاعلية ====================
+# ==================== لوحة المفاتيح ====================
 def get_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة موقع", callback_data="add_site"), InlineKeyboardButton("🗑️ حذف موقع", callback_data="del_site")],
@@ -270,22 +314,39 @@ def get_settings_keyboard():
         [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
     ])
 
-# ==================== معالجات الأوامر والرسائل ====================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+# ==================== الأوامر ومعالجة الرسائل الذكية ====================
+async def register_chat_if_needed(chat_id):
     if chat_id not in CONFIG.get("registered_chats", []):
         CONFIG.setdefault("registered_chats", []).append(chat_id)
         save_remote_config(CONFIG)
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await register_chat_if_needed(chat_id)
+
     name = update.effective_user.first_name or "يا بطل"
     await update.message.reply_text(
         f"👋 **أهلاً بك يا {name} في بوت المتابعة الذكي!**\n"
-        f"المستودع المرتبط: `{REPO_OWNER}/{REPO_NAME}`\n"
-        f"يتم حفظ وتحديث كافة الروابط تلقائياً.\n\n"
-        f"👇 **اختر من لوحة التحكم:**",
+        f"المستودع: `{REPO_OWNER}/{REPO_NAME}`\n"
+        f"تم ربط هذه المحادثة بنجاح.\n\n"
+        f"💡 يمكنك إضافة أي رابط فوراً بكتابة:\n"
+        f"`/add رابط_الموقع`\n\n"
+        f"👇 **أو استخدام لوحة التحكم:**",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
+
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دعم مباشر لكتابة /add مع الرابط"""
+    chat_id = update.effective_chat.id
+    await register_chat_if_needed(chat_id)
+
+    raw_text = update.message.text.strip()
+    match = re.search(r'(https?://[^\s]+)', raw_text)
+    if not match:
+        await update.message.reply_text("❌ يرجى كتابة الرابط بجوار الأمر، مثال:\n`/add https://example.com/feed`", parse_mode="Markdown")
+        return
+    await process_and_add_url(match.group(1), update)
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -307,7 +368,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "add_site":
         context.user_data["waiting_for_url"] = True
-        await query.message.reply_text("🔗 **أرسل الآن رابط الموقع أو قناة اليوتيوب (خلاصات RSS):**")
+        await query.message.reply_text("🔗 **أرسل الآن الرابط (سواء بدأ بـ / أو بدون /):**")
 
     elif data == "del_site":
         sites = CONFIG.get("sites", [])
@@ -355,36 +416,57 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_feeds_cycle(context.application)
         await query.message.reply_text("✅ **اكتمل الفحص الفوري.**")
 
-async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("waiting_for_url"):
+async def process_and_add_url(raw_url: str, update: Update):
+    clean_url = raw_url.strip()
+    status_msg = await update.message.reply_text("🔍 **جاري فحص الرابط عبر محاكي المتصفح وتخطي الحجب...**")
+
+    feed, final_url = await asyncio.to_thread(parse_feed_robust, clean_url)
+
+    if not feed or (not feed.entries and len(feed.feed) == 0):
+        await status_msg.edit_text("❌ **تعذر قراءة الخلاصات من هذا الرابط.** يرجى التأكد من صحة الرابط.")
+        return
+
+    site_name = feed.feed.get("title") or "مصدر تقني"
+    last_id = getattr(feed.entries[0], 'id', getattr(feed.entries[0], 'link', '')) if feed.entries else ""
+
+    new_entry = {
+        "id": int(time.time()),
+        "name": site_name,
+        "url": final_url,
+        "last_id": last_id
+    }
+    CONFIG.setdefault("sites", []).append(new_entry)
+    save_remote_config(CONFIG)
+
+    await status_msg.edit_text(
+        f"✅ **تمت إضافة المصدر بنجاح!**\n📌 **الاسم:** {site_name}\n🔗 `{final_url}`",
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
+    )
+
+async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يلتقط أي نص في المحادثة أو المجموعة سواء كان يبدأ بـ / أو بدون"""
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+    chat_id = update.effective_chat.id
+    await register_chat_if_needed(chat_id)
+
+    # إذا كان الرابط مرسلاً بعد الضغط على زر إضافة، أو يحتوي على رابط http
+    match = re.search(r'(https?://[^\s]+)', text)
+    if match and (context.user_data.get("waiting_for_url") or text.startswith("/")):
         context.user_data["waiting_for_url"] = False
-        url = update.message.text.strip()
-        status_msg = await update.message.reply_text("🔍 **جاري فحص الرابط والتأكد من الخلاصات...**")
+        await process_and_add_url(match.group(1), update)
+    elif context.user_data.get("waiting_for_url"):
+        context.user_data["waiting_for_url"] = False
+        # إذا كتب المستخدم الرابط بدون http ومسبوقاً بـ /
+        cleaned = text.lstrip("/").strip()
+        if not cleaned.startswith("http"):
+            cleaned = "https://" + cleaned
+        await process_and_add_url(cleaned, update)
 
-        feed = feedparser.parse(url)
-        if not feed.entries and feed.bozo:
-            await status_msg.edit_text("❌ **تعذر قراءة الخلاصات من هذا الرابط.** تأكد أنه رابط RSS صالح.")
-            return
-
-        site_name = feed.feed.get("title") or "مصدر تقني"
-        last_id = getattr(feed.entries[0], 'id', getattr(feed.entries[0], 'link', '')) if feed.entries else ""
-
-        new_entry = {
-            "id": int(time.time()),
-            "name": site_name,
-            "url": url,
-            "last_id": last_id
-        }
-        CONFIG.setdefault("sites", []).append(new_entry)
-        save_remote_config(CONFIG)
-
-        await status_msg.edit_text(
-            f"✅ **تمت إضافة المصدر بنجاح!**\n📌 **الاسم:** {site_name}\n🔗 `{url}`",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
-
-# ==================== دورة فحص المواقع وإرسال المحتوى ====================
+# ==================== دورة فحص المواقع ====================
 async def process_feeds_cycle(app):
     sites = CONFIG.get("sites", [])
     chats = CONFIG.get("registered_chats", [])
@@ -396,8 +478,8 @@ async def process_feeds_cycle(app):
 
     for site in sites:
         try:
-            feed = feedparser.parse(site["url"])
-            if not feed.entries:
+            feed, _ = await asyncio.to_thread(parse_feed_robust, site["url"])
+            if not feed or not feed.entries:
                 continue
 
             new_items = []
@@ -473,7 +555,7 @@ async def process_feeds_cycle(app):
         except Exception as se:
             logger.error(f"خطأ أثناء فحص {site.get('name')}: {se}")
 
-# ==================== مهمة الفحص الدوري المدمجة (بدون مكتبات خارجية) ====================
+# ==================== المؤقت الدوري ====================
 async def background_loop(app):
     await asyncio.sleep(10)
     while True:
@@ -499,8 +581,10 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_input))
+    # يلتقط الرسائل حتى لو بدأت بـ / للتعرف على الروابط
+    app.add_handler(MessageHandler(filters.ALL, handle_any_message))
 
     print("🚀 تم تشغيل البوت بنجاح ومزامنة الإعدادات! جاري استقبال الرسائل...")
     app.run_polling(drop_pending_updates=True)
