@@ -11,7 +11,8 @@ import logging
 import asyncio
 import tempfile
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
+import calendar
 from email.utils import parsedate_to_datetime
 from typing import Dict, Any, List
 
@@ -73,7 +74,6 @@ GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/content
 
 MAX_TELEGRAM_FILE_SIZE = 49 * 1024 * 1024
 START_TIME = time.time()
-# إيقاف نظيف بعد 4 ساعات و55 دقيقة ليتسلم الجدول التالي في جيت هب
 MAX_SERVER_LIFETIME = (5 * 3600) - 300 
 
 BROWSER_HEADERS = {
@@ -82,8 +82,178 @@ BROWSER_HEADERS = {
     "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
 }
 
+scraping_session = requests.Session()
+scraping_session.headers.update(BROWSER_HEADERS)
+
+trans_session = requests.Session()
+trans_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9"
+})
+
 CONFIG_LOCK = asyncio.Lock()
 GITHUB_FILE_SHA = None
+
+# اللغات المدعومة للترجمة
+SUPPORTED_LANGS = {
+    'ar': '🇸🇦 العربية',
+    'en': '🇬🇧 الإنجليزية',
+    'fr': '🇫🇷 الفرنسية',
+    'es': '🇪🇸 الإسبانية',
+    'de': '🇩🇪 الألمانية',
+    'tr': '🇹🇷 التركية',
+    'none': '🚫 إيقاف الترجمة'
+}
+
+# ==================== خوارزميات الترجمة مثل الأداة ====================
+def parse_google_response(data):
+    if isinstance(data, dict):
+        if "sentences" in data:
+            return "".join([s.get("trans", "") for s in data["sentences"] if isinstance(s, dict)])
+        if "translation" in data:
+            return data["translation"]
+    elif isinstance(data, list):
+        result = []
+        if len(data) > 0 and isinstance(data[0], list):
+            for item in data[0]:
+                if isinstance(item, list) and len(item) > 0 and isinstance(item[0], str):
+                    result.append(item[0])
+                elif isinstance(item, str):
+                    result.append(item)
+            if result:
+                return "".join(result)
+        elif len(data) > 0 and isinstance(data[0], str):
+            return "".join(data)
+    elif isinstance(data, str):
+        return data
+    return None
+
+def translate_google(text, target_lang):
+    headers = {"Content-Type": "application/x-www-form-urlencoded;charset=utf-8", "Accept": "*/*"}
+    try:
+        url = "https://clients5.google.com/translate_a/t"
+        params = {"client": "dict-chrome-ex", "sl": "auto", "tl": target_lang}
+        res = trans_session.post(url, params=params, data={"q": text}, headers=headers, timeout=8)
+        if res.status_code == 200:
+            parsed = parse_google_response(res.json())
+            if parsed and parsed.strip():
+                return parsed.strip()
+    except Exception:
+        pass
+
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t"}
+        res = trans_session.post(url, params=params, data={"q": text}, headers=headers, timeout=8)
+        if res.status_code == 200:
+            parsed = parse_google_response(res.json())
+            if parsed and parsed.strip():
+                return parsed.strip()
+    except Exception:
+        pass
+
+    raise RuntimeError("تعذر الاتصال بخوادم ترجمة جوجل.")
+
+def translate_mymemory(text, target_lang):
+    url = "https://api.mymemory.translated.net/get"
+    params = {"q": text[:450], "langpair": f"en|{target_lang}"}
+    res = trans_session.get(url, params=params, timeout=8)
+    if res.status_code == 200:
+        val = res.json().get("responseData", {}).get("translatedText", "")
+        if val and "MYMEMORY WARNING" not in val and "INVALID TARGET" not in val:
+            return val
+    raise RuntimeError("فشل خادم مايميموري.")
+
+def split_into_chunks(text, max_len=700):
+    if not text:
+        return []
+    paragraphs = text.split("\n")
+    chunks = []
+    current_chunk = ""
+
+    for para in paragraphs:
+        p = para.strip()
+        if not p:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            continue
+
+        if len(p) > max_len:
+            sentences = re.split(r'(?<=[.?!؟؛\n])\s+', p)
+            for s in sentences:
+                s = s.strip()
+                if not s:
+                    continue
+                if len(s) > max_len:
+                    for i in range(0, len(s), max_len):
+                        sub = s[i:i+max_len].strip()
+                        if sub:
+                            chunks.append(sub)
+                elif len(current_chunk) + len(s) + 1 <= max_len:
+                    current_chunk += (" " if current_chunk else "") + s
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = s
+        elif len(current_chunk) + len(p) + 1 <= max_len:
+            current_chunk += ("\n\n" if current_chunk else "") + p
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = p
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+def _execute_translation(chunk, target_lang, engine):
+    if not chunk or not chunk.strip():
+        return chunk
+    engines = [engine]
+    if "google" not in engines:
+        engines.append("google")
+    if "mymemory" not in engines:
+        engines.append("mymemory")
+
+    for eng in engines:
+        try:
+            if eng == "google":
+                return translate_google(chunk, target_lang)
+            elif eng == "mymemory":
+                return translate_mymemory(chunk, target_lang)
+        except Exception:
+            continue
+    return chunk
+
+def translate_text_pipeline(text, target_lang, engine="google"):
+    if not text or target_lang == 'none':
+        return text, False
+
+    chunks = split_into_chunks(text, max_len=700)
+    if not chunks:
+        return text, False
+
+    translated_blocks = []
+    any_success = False
+
+    for chunk in chunks:
+        trans_chunk = _execute_translation(chunk, target_lang, engine)
+        if trans_chunk != chunk:
+            any_success = True
+        translated_blocks.append(trans_chunk)
+        time.sleep(0.08)
+
+    return "\n\n".join(translated_blocks), any_success
+
+def is_english_content(title: str, text: str = "") -> bool:
+    """كشف المنشورات الإنجليزية تلقائياً"""
+    sample = f"{title} {text[:300]}"
+    eng_chars = len(re.findall(r'[a-zA-Z]', sample))
+    ar_chars = len(re.findall(r'[\u0600-\u06FF]', sample))
+    return eng_chars > ar_chars and eng_chars >= 6
 
 # ==================== مزامنة GitHub API وحفظ الإعدادات ====================
 def _sync_get_config():
@@ -91,7 +261,8 @@ def _sync_get_config():
     default_cfg = {
         "check_interval_minutes": 10,
         "last_check_timestamp": 0,
-        "text_mode": "full",
+        "trans_engine": "google",
+        "target_lang": "ar",
         "video_mode": "file",
         "active_chat_id": None,
         "sites": []
@@ -148,7 +319,6 @@ def _sync_save_config(new_config: dict):
 
     for attempt in range(2):
         try:
-            # في حال عدم وجود SHA، نجلب أحدث SHA من الخادم لتفادي التعارض 409
             if not GITHUB_FILE_SHA:
                 res_check = requests.get(GITHUB_API_URL, headers=headers, timeout=8)
                 if res_check.status_code == 200:
@@ -166,10 +336,9 @@ def _sync_save_config(new_config: dict):
                 GITHUB_FILE_SHA = res.json().get("content", {}).get("sha", GITHUB_FILE_SHA)
                 return True
             elif res.status_code == 409:
-                # تعارض في SHA - نقوم بتصفيرها لإعادة جلبها في المحاولة التالية
                 GITHUB_FILE_SHA = None
         except Exception as e:
-            logger.error(f"خطأ حفظ جيت هب (محاولة {attempt+1}): {e}")
+            logger.error(f"خطأ حفظ جيت هب: {e}")
             GITHUB_FILE_SHA = None
     return False
 
@@ -195,7 +364,7 @@ async def safe_edit_text(query, text, reply_markup=None):
 def parse_feed_robust(url: str):
     url = url.strip()
     try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=10, allow_redirects=True)
+        resp = scraping_session.get(url, timeout=10, allow_redirects=True)
         if resp.status_code == 200 and resp.content:
             feed = feedparser.parse(resp.content)
             if feed.entries or len(feed.feed) > 0:
@@ -214,7 +383,7 @@ def parse_feed_robust(url: str):
         for suffix in ["/feed", "/feed/", "/rss"]:
             test_url = url.rstrip("/") + suffix
             try:
-                resp = requests.get(test_url, headers=BROWSER_HEADERS, timeout=7)
+                resp = scraping_session.get(test_url, timeout=7)
                 if resp.status_code == 200:
                     feed = feedparser.parse(resp.content)
                     if feed.entries:
@@ -233,36 +402,67 @@ def parse_date(entry):
                 return dt.strftime("%Y-%m-%d %H:%M UTC")
             except Exception:
                 pass
-    return "تاريخ غير محدد"
+    return "تاريخ النشر غير محدد"
 
 def get_entry_id(entry):
     return str(getattr(entry, 'id', getattr(entry, 'link', '')) or getattr(entry, 'title', '')).strip()
 
-def extract_article_text(entry, link: str) -> str:
-    full_text = ""
-    if 'content' in entry and len(entry.content) > 0:
-        full_text = entry.content[0].get('value', '')
-    elif 'summary_detail' in entry and entry.summary_detail.get('value'):
-        full_text = entry.summary_detail.get('value', '')
-    elif 'summary' in entry:
-        full_text = entry.get('summary', '')
-
-    if full_text:
-        return BeautifulSoup(full_text, "html.parser").get_text(separator="\n", strip=True)
-
-    if link:
+def extract_full_article(url: str, entry=None) -> str:
+    """استخراج المقال النصي كاملاً من المصدر بنفس طريقة الأداة"""
+    if url:
         try:
-            r = requests.get(link, timeout=7, headers=BROWSER_HEADERS)
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.content, "html.parser")
-                for s in soup(["script", "style", "nav", "header", "footer"]):
-                    s.decompose()
-                main_tag = soup.find("article") or soup.find("main") or soup.body
-                if main_tag:
-                    return main_tag.get_text(separator="\n", strip=True)[:2500]
+            resp = scraping_session.get(url, timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.content, "html.parser")
+                for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form", "noscript", "svg", "iframe"]):
+                    tag.decompose()
+
+                container = (
+                    soup.find("article") or
+                    soup.find("main") or
+                    soup.find("div", {"role": "main"}) or
+                    soup.find(class_=re.compile(r"(article-content|post-content|entry-content|story-body|article__body|content__body|post-body)", re.I)) or
+                    soup.body
+                )
+
+                if container:
+                    parts = []
+                    for elem in container.find_all(["h1", "h2", "h3", "h4", "p", "li", "blockquote"]):
+                        text = elem.get_text(separator=" ", strip=True)
+                        if not text or len(text) < 15:
+                            continue
+                        if elem.name in ["h1", "h2", "h3", "h4"]:
+                            parts.append(f"\n【 {text} 】\n")
+                        elif elem.name == "li":
+                            parts.append(f"• {text}")
+                        elif elem.name == "blockquote":
+                            parts.append(f"« {text} »")
+                        else:
+                            parts.append(text)
+
+                    result = "\n\n".join(parts)
+                    if len(result.strip()) > 100:
+                        return result.strip()
         except Exception:
             pass
-    return "نص الموضوع متاح عبر الرابط المرفق."
+
+    # إذا تعذر السحب المباشر، يتم الاعتماد على محتوى الـ RSS
+    if entry:
+        if 'content' in entry and len(entry.content) > 0:
+            full_text = entry.content[0].get('value', '')
+        elif 'summary_detail' in entry and entry.summary_detail.get('value'):
+            full_text = entry.summary_detail.get('value', '')
+        elif 'summary' in entry:
+            full_text = entry.get('summary', '')
+        elif 'description' in entry:
+            full_text = entry.get('description', '')
+        else:
+            full_text = ""
+
+        if full_text:
+            return BeautifulSoup(full_text, "html.parser").get_text(separator="\n", strip=True)
+
+    return "المحتوى الكامل متاح عبر الرابط المرفق للمقال."
 
 # ==================== معالجة الفيديوهات ====================
 YTDL_BASE_OPTS = {
@@ -331,11 +531,14 @@ def get_main_keyboard():
 
 def get_settings_keyboard():
     s = CONFIG
-    t_labels = {"full": "النص كاملاً", "summary": "ملخص فقط", "title": "العنوان فقط"}
+    engine_label = "جوجل 🚀" if s.get("trans_engine") == "google" else "مايميموري 🧠"
+    target_code = s.get("target_lang", "ar")
+    lang_label = SUPPORTED_LANGS.get(target_code, "العربية 🇸🇦")
     v_labels = {"file": "إرسال كفيديو مجزأ", "link": "إرسال كرابط"}
     
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"عرض المنشورات: {t_labels.get(s.get('text_mode'), 'كامل')}", callback_data="toggle_text")],
+        [InlineKeyboardButton(f"🌐 لغة الترجمة: {lang_label}", callback_data="toggle_target_lang")],
+        [InlineKeyboardButton(f"⚙️ محرك الترجمة: {engine_label}", callback_data="toggle_engine")],
         [InlineKeyboardButton(f"الفيديوهات: {v_labels.get(s.get('video_mode'), 'ملف')}", callback_data="toggle_video")],
         [InlineKeyboardButton(f"⏱️ مدة الفحص: كل {s.get('check_interval_minutes', 10)} دقيقة", callback_data="change_interval")],
         [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
@@ -343,7 +546,6 @@ def get_settings_keyboard():
 
 # ==================== إدارة المحادثات والأوامر ====================
 async def update_active_chat(chat):
-    """تحديث المحادثة النشطة (مجموعة، قناة، أو حتى محادثة خاصة)"""
     if chat and chat.id:
         if CONFIG.get("active_chat_id") != chat.id:
             CONFIG["active_chat_id"] = chat.id
@@ -353,8 +555,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_active_chat(update.effective_chat)
     name = update.effective_user.first_name or "يا بطل"
     await update.message.reply_text(
-        f"مرحباً بك يا {name} في بوت المتابعة المستقر!\n\n"
-        f"✅ تم تعيين هذه المحادثة كوجهة أساسية للبث.\n"
+        f"مرحباً بك يا {name} في بوت المتابعة والترجمة التلقائية!\n\n"
+        f"✅ تم تعيين هذه المحادثة كوجهة أساسية.\n"
         f"لإضافة موقع أرسل: `/add رابط_الموقع` أو اختر من اللوحة أدناه:",
         reply_markup=get_main_keyboard()
     )
@@ -394,7 +596,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         full_text = "\n".join(text_lines)
 
         if len(full_text) > 3800:
-            full_text = full_text[:3800] + "\n...(تم اختصار باقي المواقع لطول القائمة)"
+            full_text = full_text[:3800] + "\n...(تم اختصار باقي القائمة)"
 
         await safe_edit_text(query, full_text, back_kb)
 
@@ -420,20 +622,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_text(query, "✅ تم حذف الموقع بنجاح!", get_main_keyboard())
 
     elif data == "settings":
-        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والترجمة:", get_settings_keyboard())
 
-    elif data == "toggle_text":
-        modes = ["full", "summary", "title"]
-        cur = CONFIG.get("text_mode", "full")
-        CONFIG["text_mode"] = modes[(modes.index(cur) + 1) % len(modes)]
+    elif data == "toggle_engine":
+        cur = CONFIG.get("trans_engine", "google")
+        CONFIG["trans_engine"] = "mymemory" if cur == "google" else "google"
         await save_config_async()
-        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والترجمة:", get_settings_keyboard())
+
+    elif data == "toggle_target_lang":
+        langs = list(SUPPORTED_LANGS.keys())
+        cur = CONFIG.get("target_lang", "ar")
+        idx = langs.index(cur) if cur in langs else 0
+        CONFIG["target_lang"] = langs[(idx + 1) % len(langs)]
+        await save_config_async()
+        await safe_edit_text(query, "⚙️ إعدادات البوت والترجمة:", get_settings_keyboard())
 
     elif data == "toggle_video":
         cur = CONFIG.get("video_mode", "file")
         CONFIG["video_mode"] = "link" if cur == "file" else "file"
         await save_config_async()
-        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والترجمة:", get_settings_keyboard())
 
     elif data == "change_interval":
         intervals = [5, 10, 15, 30, 60]
@@ -441,7 +650,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = intervals.index(cur) if cur in intervals else 0
         CONFIG["check_interval_minutes"] = intervals[(idx + 1) % len(intervals)]
         await save_config_async()
-        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والترجمة:", get_settings_keyboard())
 
     elif data == "force_check":
         status_msg = await query.message.reply_text("🔄 جاري الفحص الفوري الآن...")
@@ -461,8 +670,7 @@ async def process_and_add_url(raw_url: str, update: Update):
         await status_msg.edit_text("❌ تعذر قراءة الرابط كخلاصة RSS صالحة. تأكد من صحة الرابط.")
         return
 
-    site_name = feed.feed.get("title") or "مصدر إخباري"
-    # أخذ أحدث مقال فوراً لحفظه كمرجع للفحص القادم دون إرسال القديم
+    site_name = feed.feed.get("title") or "مصدر تقني"
     last_id = get_entry_id(feed.entries[0]) if feed.entries else ""
 
     new_entry = {
@@ -498,7 +706,7 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             cleaned = "https://" + cleaned
         await process_and_add_url(cleaned, update)
 
-# ==================== دورة فحص المواقع (صامتة بالكامل) ====================
+# ==================== دورة فحص المواقع والترجمة الذكية ====================
 async def process_feeds_cycle(app, target_chat_override=None) -> int:
     sites = CONFIG.get("sites", [])
     if not sites:
@@ -508,7 +716,8 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
     if not target_chat:
         return 0
 
-    text_mode = CONFIG.get("text_mode", "full")
+    engine = CONFIG.get("trans_engine", "google")
+    target_lang = CONFIG.get("target_lang", "ar")
     video_mode = CONFIG.get("video_mode", "file")
     total_new_items = 0
     config_modified = False
@@ -522,13 +731,13 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
             latest_entry = feed.entries[0]
             latest_id = get_entry_id(latest_entry)
 
-            # الشرط المطلوب: إذا لم يكن هناك مقال مسجل (أول فحص)، نحفظه ولا نرسل شيئاً
+            # إذا كان أول فحص: نحفظ آخر مقال كمرجع فقط ولا نرسله
             if not site.get("last_id"):
                 site["last_id"] = latest_id
                 config_modified = True
                 continue
 
-            # في الفحوصات التالية: نبحث عن كل ما هو أحدث من المقال المحفوظ
+            # في الفحوصات التالية: جلب المقالات الأحدث من المحفوظة
             new_items = []
             for entry in feed.entries:
                 e_id = get_entry_id(entry)
@@ -538,28 +747,48 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
 
             if new_items:
                 total_new_items += len(new_items)
-                # إرسال المقالات من الأقدم للأحدث بالترتيب
+                # الإرسال بترتيب النشر (من الأقدم إلى الأحدث)
                 for entry in reversed(new_items):
-                    title = entry.get("title", "بدون عنوان").strip()
+                    raw_title = entry.get("title", "بدون عنوان").strip()
                     link = entry.get("link", "").strip()
                     pub_date = parse_date(entry)
 
-                    if text_mode == "title":
-                        msg_body = f"📢 منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\nالرابط: {link}"
-                    elif text_mode == "summary":
-                        raw_summary = entry.get('summary', '') or entry.get('description', '')
-                        clean_summary = BeautifulSoup(raw_summary, "html.parser").get_text(separator=" ", strip=True)[:350]
-                        msg_body = f"📢 منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\n\nالملخص:\n{clean_summary}...\n\nالرابط: {link}"
-                    else:
-                        body = await asyncio.to_thread(extract_article_text, entry, link)
-                        msg_body = (
-                            f"📌 المصدر: {site['name']}\n\n"
-                            f"العنوان: {title}\n\n"
-                            f"الموضوع:\n{body[:3500]}\n\n"
-                            f"الوقت: {pub_date}\n"
-                            f"الرابط: {link}"
-                        )
+                    # استخراج المقال كاملاً بنفس طريقة الأداة
+                    full_text = await asyncio.to_thread(extract_full_article, link, entry)
 
+                    # فحص ما إذا كان المنشور باللغة الإنجليزية للترجمة
+                    need_trans = (target_lang != 'none') and is_english_content(raw_title, full_text)
+
+                    if need_trans:
+                        # ترجمة العنوان لوحده
+                        final_title, title_ok = await asyncio.to_thread(
+                            translate_text_pipeline, raw_title, target_lang, engine
+                        )
+                        # ترجمة نص المقال لوحده
+                        final_content, body_ok = await asyncio.to_thread(
+                            translate_text_pipeline, full_text, target_lang, engine
+                        )
+                        is_translated = (title_ok or body_ok)
+                    else:
+                        final_title = raw_title
+                        final_content = full_text
+                        is_translated = False
+
+                    trans_tag = " (مترجم)" if is_translated else ""
+
+                    # تنسيق المقال كما في الأداة تماماً
+                    # العنوان ثم نص المقال كاملاً ثم الوقت والتاريخ ثم الرابط
+                    header_part = f"العنوان{trans_tag}: {final_title}\n\nنص المقال كاملاً كما كُتب في الموقع{trans_tag}:\n"
+                    footer_part = f"\n\nالوقت والتاريخ: {pub_date}\nرابط صفحة الويب: {link}"
+
+                    # ضمان عدم تجاوز الحد الأقصى لحجم رسالة تيليجرام (4096 حرف)
+                    available_content_len = 4000 - len(header_part) - len(footer_part)
+                    if len(final_content) > available_content_len:
+                        final_content = final_content[:max(100, available_content_len)] + "\n...(تم اختصار باقي المقال لطوله)"
+
+                    msg_body = f"{header_part}{final_content}{footer_part}"
+
+                    # معالجة الفيديوهات إن وجدت
                     is_video_post = ("youtube.com" in link or "youtu.be" in link)
                     download_done = False
 
@@ -572,7 +801,7 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
                                 total_parts = len(parts)
 
                                 for p_idx, part_path in enumerate(parts, 1):
-                                    caption = f"🎬 {title[:60]}"
+                                    caption = f"🎬 {final_title[:60]}"
                                     if total_parts > 1:
                                         caption += f" (الجزء {p_idx} من {total_parts})"
                                     with open(part_path, "rb") as vf:
@@ -590,13 +819,12 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
 
                     if not download_done:
                         try:
-                            await app.bot.send_message(chat_id=target_chat, text=msg_body)
+                            await app.bot.send_message(chat_id=target_chat, text=msg_body, disable_web_page_preview=False)
                         except Exception as me:
-                            logger.error(f"فشل إرسال الرسالة إلى {target_chat}: {me}")
+                            logger.error(f"فشل إرسال الرسالة: {me}")
 
                     await asyncio.sleep(0.5)
 
-                # تحديث آخر مقال وحفظه في الإعدادات
                 site["last_id"] = latest_id
                 config_modified = True
 
@@ -610,14 +838,13 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
 
     return total_new_items
 
-# ==================== الفحص الدوري الصامت والدقيق ====================
+# ==================== الفحص الدوري ====================
 async def background_loop(app):
     await asyncio.sleep(5)
     while True:
         try:
-            # التحقق من المدة الزمنية المتبقية للخادم (إيقاف قبل الوصول للحد لتسليم السيرفر التالي)
             if time.time() - START_TIME >= MAX_SERVER_LIFETIME:
-                logger.info("⏳ انتهت فترة الـ 5 ساعات المحددة، جاري الإغلاق النظيف لإفساح المجال للجلسة المجدولة...")
+                logger.info("⏳ انتهت فترة الـ 5 ساعات، جاري الإغلاق النظيف لإفساح المجال للجدول التالي...")
                 os._exit(0)
 
             interval_seconds = max(60, CONFIG.get("check_interval_minutes", 10) * 60)
@@ -625,15 +852,11 @@ async def background_loop(app):
             now = time.time()
             elapsed = now - last_check
 
-            # فحص دقيق محسوب بالثانية دون أي تقديم أو تأخير
             if elapsed >= interval_seconds:
                 CONFIG["last_check_timestamp"] = now
                 await save_config_async()
-                
-                # فحص صامت تماماً دون إرسال أي إشعار إن لم يكن هناك جديد
                 await process_feeds_cycle(app)
 
-            # فحص كل 10 ثوانٍ ليكون متزامناً بدقة شديدة مع الإعدادات
             await asyncio.sleep(10)
 
         except Exception as e:
@@ -642,7 +865,7 @@ async def background_loop(app):
 
 async def on_post_init(app):
     asyncio.create_task(background_loop(app))
-    logger.info("✅ تم بدء الجدولة الدقيقة بنجاح.")
+    logger.info("✅ تم بدء الجدولة الدقيقة والترجمة بنجاح.")
 
 # ==================== التشغيل ====================
 def main():
@@ -659,7 +882,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
 
-    print("🚀 تم تشغيل البوت بنجاح! الفحص صامت، الأزرار مستجيبة، والتوقيت دقيق جداً.")
+    print("🚀 تم تشغيل البوت بنجاح مع محركات الترجمة والتنسيق المطور.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
