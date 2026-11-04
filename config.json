@@ -57,6 +57,12 @@
       "name": "مدونة نافذة التقنية",
       "url": "https://blog.tecwindow.net/feed/",
       "last_id": "https://blog.tecwindow.net/?p=5823"
+    },
+    {
+      "id": 1793811206,
+      "name": "TechCrunch",
+      "url": "https://techcrunch.com/feed/",
+      "last_id": "https://techcrunch.com/?p=3185071"
     }
   ],
   "registered_chats": [
