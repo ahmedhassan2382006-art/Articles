@@ -1,0 +1,5 @@
+python-telegram-bot==20.8
+yt-dlp>=2024.08.06
+feedparser>=6.0.11
+beautifulsoup4>=4.12.3
+requests>=2.32.3
