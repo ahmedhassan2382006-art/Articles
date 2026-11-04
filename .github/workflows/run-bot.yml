@@ -1,0 +1,64 @@
+name: Run Telegram RSS and Media Downloader Bot
+
+on:
+  schedule:
+    # إعادة تشغيل البوت كل 5 ساعات لضمان بقائه حياً 24/7 دون توقف
+    - cron: '0 */5 * * *'
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: telegram-bot-group
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # تنظيف أي جلسة سابقة لتفادي تشغيل نسختين في نفس الوقت
+      - name: Cancel older runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for run_id in $(gh run list --repo "$GITHUB_REPOSITORY" --status in_progress --json databaseId -q '.[].databaseId'); do
+            if [ "$run_id" != "$GITHUB_RUN_ID" ]; then
+              echo "إيقاف الجلسة السابقة: $run_id"
+              gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY" || true
+            fi
+          done
+          sleep 2
+
+      # تثبيت FFmpeg لتقسيم الفيديوهات ومعالجة الصوت
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # تثبيت بيئة بايثون 3.10
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      # تثبيت المكتبات وتحديث yt-dlp بأحدث إصدار لتخطي قيود يوتيوب
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade yt-dlp
+
+      # تشغيل البوت مع تمرير السيكريت
+      - name: Run Bot
+        env:
+          BOT_SECRET: ${{ secrets['3bot'] || secrets.BOT_SECRET }}
+        run: python bot.py
