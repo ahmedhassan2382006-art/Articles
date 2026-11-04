@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== قراءة التوكنات بذكاء ====================
+# ==================== قراءة التوكنات ====================
 SECRET_RAW = (
     os.environ.get("BOT_SECRET")
     or os.environ.get("3bot")
@@ -72,27 +72,28 @@ CONFIG_FILE_PATH = "config.json"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{CONFIG_FILE_PATH}"
 
 MAX_TELEGRAM_FILE_SIZE = 49 * 1024 * 1024
+START_TIME = time.time()
+# إيقاف نظيف بعد 4 ساعات و55 دقيقة ليتسلم الجدول التالي في جيت هب
+MAX_SERVER_LIFETIME = (5 * 3600) - 300 
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache"
 }
 
-# قفل الحفظ لمنع تعارض وتجميد طلبات GitHub API
 CONFIG_LOCK = asyncio.Lock()
 GITHUB_FILE_SHA = None
 
-# ==================== مزامنة GitHub API بأمان تام ====================
+# ==================== مزامنة GitHub API وحفظ الإعدادات ====================
 def _sync_get_config():
     global GITHUB_FILE_SHA
     default_cfg = {
         "check_interval_minutes": 10,
+        "last_check_timestamp": 0,
         "text_mode": "full",
         "video_mode": "file",
-        "active_group_id": None,  # آخر مجموعة نشطة يرسل لها حصراً
+        "active_chat_id": None,
         "sites": []
     }
 
@@ -100,7 +101,10 @@ def _sync_get_config():
         if os.path.exists("config.json"):
             try:
                 with open("config.json", "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    cfg = json.load(f)
+                    for k, v in default_cfg.items():
+                        cfg.setdefault(k, v)
+                    return cfg
             except Exception:
                 pass
         return default_cfg
@@ -111,12 +115,15 @@ def _sync_get_config():
         "User-Agent": "Telegram-RSS-Bot"
     }
     try:
-        res = requests.get(GITHUB_API_URL, headers=headers, timeout=8)
+        res = requests.get(GITHUB_API_URL, headers=headers, timeout=12)
         if res.status_code == 200:
             data = res.json()
             GITHUB_FILE_SHA = data.get("sha")
             raw_content = base64.b64decode(data.get("content", "")).decode("utf-8")
-            return json.loads(raw_content)
+            cfg = json.loads(raw_content)
+            for k, v in default_cfg.items():
+                cfg.setdefault(k, v)
+            return cfg
     except Exception as e:
         logger.error(f"خطأ قراءة جيت هب: {e}")
 
@@ -138,20 +145,32 @@ def _sync_save_config(new_config: dict):
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "Telegram-RSS-Bot"
     }
-    try:
-        content_bytes = json.dumps(new_config, ensure_ascii=False, indent=2).encode("utf-8")
-        b64_content = base64.b64encode(content_bytes).decode("utf-8")
-        payload = {
-            "message": "Update config.json [Bot Auto Sync]",
-            "content": b64_content,
-            "sha": GITHUB_FILE_SHA
-        }
-        res = requests.put(GITHUB_API_URL, headers=headers, json=payload, timeout=8)
-        if res.status_code in (200, 201):
-            GITHUB_FILE_SHA = res.json().get("content", {}).get("sha", GITHUB_FILE_SHA)
-            return True
-    except Exception as e:
-        logger.error(f"خطأ حفظ جيت هب: {e}")
+
+    for attempt in range(2):
+        try:
+            # في حال عدم وجود SHA، نجلب أحدث SHA من الخادم لتفادي التعارض 409
+            if not GITHUB_FILE_SHA:
+                res_check = requests.get(GITHUB_API_URL, headers=headers, timeout=8)
+                if res_check.status_code == 200:
+                    GITHUB_FILE_SHA = res_check.json().get("sha")
+
+            content_bytes = json.dumps(new_config, ensure_ascii=False, indent=2).encode("utf-8")
+            b64_content = base64.b64encode(content_bytes).decode("utf-8")
+            payload = {
+                "message": "Update config.json [Bot Auto Sync]",
+                "content": b64_content,
+                "sha": GITHUB_FILE_SHA
+            }
+            res = requests.put(GITHUB_API_URL, headers=headers, json=payload, timeout=10)
+            if res.status_code in (200, 201):
+                GITHUB_FILE_SHA = res.json().get("content", {}).get("sha", GITHUB_FILE_SHA)
+                return True
+            elif res.status_code == 409:
+                # تعارض في SHA - نقوم بتصفيرها لإعادة جلبها في المحاولة التالية
+                GITHUB_FILE_SHA = None
+        except Exception as e:
+            logger.error(f"خطأ حفظ جيت هب (محاولة {attempt+1}): {e}")
+            GITHUB_FILE_SHA = None
     return False
 
 CONFIG = _sync_get_config()
@@ -160,22 +179,19 @@ async def save_config_async():
     async with CONFIG_LOCK:
         await asyncio.to_thread(_sync_save_config, CONFIG)
 
-# دالة ذكية لتحديث رسائل الأزرار بأمان وتفادي تعليق تليجرام
 async def safe_edit_text(query, text, reply_markup=None):
     try:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
+        await query.edit_message_text(text=text, reply_markup=reply_markup, disable_web_page_preview=True)
     except BadRequest as e:
-        if "Message is not modified" in str(e):
-            pass
-        else:
+        if "Message is not modified" not in str(e):
             try:
-                await query.message.reply_text(text=text, reply_markup=reply_markup)
+                await query.message.reply_text(text=text, reply_markup=reply_markup, disable_web_page_preview=True)
             except Exception:
                 pass
     except Exception as ex:
         logger.error(f"خطأ تعديل الرسالة: {ex}")
 
-# ==================== فحص الـ RSS السريع ====================
+# ==================== استخراج الخلاصات والمقالات ====================
 def parse_feed_robust(url: str):
     url = url.strip()
     try:
@@ -219,6 +235,9 @@ def parse_date(entry):
                 pass
     return "تاريخ غير محدد"
 
+def get_entry_id(entry):
+    return str(getattr(entry, 'id', getattr(entry, 'link', '')) or getattr(entry, 'title', '')).strip()
+
 def extract_article_text(entry, link: str) -> str:
     full_text = ""
     if 'content' in entry and len(entry.content) > 0:
@@ -245,18 +264,13 @@ def extract_article_text(entry, link: str) -> str:
             pass
     return "نص الموضوع متاح عبر الرابط المرفق."
 
-# ==================== تنزيل الفيديوهات وتقطيعها ====================
+# ==================== معالجة الفيديوهات ====================
 YTDL_BASE_OPTS = {
     "quiet": True,
     "no_warnings": True,
     "geo_bypass": True,
     "nocheckcertificate": True,
     "socket_timeout": 15,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "visionos", "default"]
-        }
-    }
 }
 
 def download_video_stream(url: str, out_folder: str) -> str:
@@ -266,7 +280,6 @@ def download_video_stream(url: str, out_folder: str) -> str:
         "outtmpl": out_tmpl,
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
-        "concurrent_fragment_downloads": 4
     })
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -308,7 +321,7 @@ def split_video_ffmpeg(filepath: str, max_chunk_bytes: int = MAX_TELEGRAM_FILE_S
 
     return parts if parts else [filepath]
 
-# ==================== لوحة المفاتيح ====================
+# ==================== لوحات المفاتيح والأزرار ====================
 def get_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة موقع", callback_data="add_site"), InlineKeyboardButton("🗑️ حذف موقع", callback_data="del_site")],
@@ -328,23 +341,21 @@ def get_settings_keyboard():
         [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
     ])
 
-# ==================== الأوامر ومعالجة الرسائل ====================
+# ==================== إدارة المحادثات والأوامر ====================
 async def update_active_chat(chat):
-    """تحديث المجموعة النشطة تلقائياً لتكون الوجهة الوحيدة للبث التلقائي"""
-    if chat.type in ["group", "supergroup", "channel"]:
-        if CONFIG.get("active_group_id") != chat.id:
-            CONFIG["active_group_id"] = chat.id
+    """تحديث المحادثة النشطة (مجموعة، قناة، أو حتى محادثة خاصة)"""
+    if chat and chat.id:
+        if CONFIG.get("active_chat_id") != chat.id:
+            CONFIG["active_chat_id"] = chat.id
             await save_config_async()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_active_chat(update.effective_chat)
     name = update.effective_user.first_name or "يا بطل"
     await update.message.reply_text(
-        f"مرحباً بك يا {name} في بوت المتابعة المطور!\n"
-        f"المستودع: {REPO_OWNER}/{REPO_NAME}\n\n"
-        f"تم تعيين هذه المحادثة كوجهة أساسية.\n"
-        f"لإضافة أي موقع اكتب:\n/add رابط_الموقع\nأو أرسل الرابط مسبوقاً بـ /\n\n"
-        f"اختر من لوحة التحكم:",
+        f"مرحباً بك يا {name} في بوت المتابعة المستقر!\n\n"
+        f"✅ تم تعيين هذه المحادثة كوجهة أساسية للبث.\n"
+        f"لإضافة موقع أرسل: `/add رابط_الموقع` أو اختر من اللوحة أدناه:",
         reply_markup=get_main_keyboard()
     )
 
@@ -359,7 +370,10 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # الرد فوراً لمنع تعليق الزر نهائياً
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     data = query.data
     await update_active_chat(query.message.chat)
@@ -369,25 +383,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "list_sites":
         sites = CONFIG.get("sites", [])
+        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]])
         if not sites:
-            await safe_edit_text(query, "لا توجد أي مواقع مضافة حالياً.", get_main_keyboard())
+            await safe_edit_text(query, "لا توجد أي مواقع مضافة حالياً في القائمة.", back_kb)
             return
 
-        # عرض بدون رموز معقدة لتجنب أي أخطاء ولتكون سريعة جداً مع قارئ الشاشة
-        text_lines = ["قائمة المواقع والروابط المتابعة:\n"]
+        text_lines = ["📋 قائمة المواقع المتابعة حالياً:\n"]
         for idx, s in enumerate(sites, 1):
             text_lines.append(f"{idx}. {s.get('name')}\nالرابط: {s.get('url')}\n")
         full_text = "\n".join(text_lines)
 
-        # تقسيم الرسالة إذا كانت طويلة جداً
         if len(full_text) > 3800:
-            full_text = full_text[:3800] + "\n...(تم اختصار الباقي)"
+            full_text = full_text[:3800] + "\n...(تم اختصار باقي المواقع لطول القائمة)"
 
-        await safe_edit_text(query, full_text, get_main_keyboard())
+        await safe_edit_text(query, full_text, back_kb)
 
     elif data == "add_site":
         context.user_data["waiting_for_url"] = True
-        await query.message.reply_text("أرسل الآن الرابط المطلوب (يمكنك كتابته مع / أو بدون):")
+        await query.message.reply_text("أرسل الآن رابط الموقع أو الخلاصة:")
 
     elif data == "del_site":
         sites = CONFIG.get("sites", [])
@@ -396,31 +409,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         buttons = []
         for s in sites:
-            buttons.append([InlineKeyboardButton(f"❌ {s.get('name')[:30]}", callback_data=f"del_{s.get('id')}")])
+            buttons.append([InlineKeyboardButton(f"❌ {s.get('name')[:28]}", callback_data=f"del_{s.get('id')}")])
         buttons.append([InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")])
-        await safe_edit_text(query, "اختر الموقع المراد حذفه نهائياً:", InlineKeyboardMarkup(buttons))
+        await safe_edit_text(query, "اختر الموقع الذي تريد حذفه:", InlineKeyboardMarkup(buttons))
 
     elif data.startswith("del_"):
         site_id = data[4:]
         CONFIG["sites"] = [s for s in CONFIG.get("sites", []) if str(s.get("id")) != site_id]
         await save_config_async()
-        await safe_edit_text(query, "تم حذف الموقع بنجاح!", get_main_keyboard())
+        await safe_edit_text(query, "✅ تم حذف الموقع بنجاح!", get_main_keyboard())
 
     elif data == "settings":
-        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
 
     elif data == "toggle_text":
         modes = ["full", "summary", "title"]
         cur = CONFIG.get("text_mode", "full")
         CONFIG["text_mode"] = modes[(modes.index(cur) + 1) % len(modes)]
         await save_config_async()
-        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
 
     elif data == "toggle_video":
         cur = CONFIG.get("video_mode", "file")
         CONFIG["video_mode"] = "link" if cur == "file" else "file"
         await save_config_async()
-        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
 
     elif data == "change_interval":
         intervals = [5, 10, 15, 30, 60]
@@ -428,26 +441,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = intervals.index(cur) if cur in intervals else 0
         CONFIG["check_interval_minutes"] = intervals[(idx + 1) % len(intervals)]
         await save_config_async()
-        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
+        await safe_edit_text(query, "⚙️ إعدادات البوت والتحكم:", get_settings_keyboard())
 
     elif data == "force_check":
-        # الفحص الفوري اليدوي يعمل في نفس المكان الذي ضغط فيه الزر
-        await query.message.reply_text("جاري الفحص الآن خطوة بخطوة...")
-        await process_feeds_cycle(context.application, target_chat_override=query.message.chat_id, announce=False)
-        await query.message.reply_text("اكتمل فحص جميع المواقع بنجاح.")
+        status_msg = await query.message.reply_text("🔄 جاري الفحص الفوري الآن...")
+        new_found = await process_feeds_cycle(context.application, target_chat_override=query.message.chat_id)
+        if new_found > 0:
+            await status_msg.edit_text(f"✅ اكتمل الفحص وتم إرسال {new_found} مقال/منشور جديد.")
+        else:
+            await status_msg.edit_text("✅ تم الفحص، لا توجد أي مقالات جديدة.")
 
 async def process_and_add_url(raw_url: str, update: Update):
     clean_url = raw_url.strip()
-    status_msg = await update.message.reply_text("جاري فحص الرابط سريعاً وتخطي الحجب...")
+    status_msg = await update.message.reply_text("🔍 جاري فحص الرابط وجلب أحدث مقال...")
 
     feed, final_url = await asyncio.to_thread(parse_feed_robust, clean_url)
 
     if not feed or (not feed.entries and len(feed.feed) == 0):
-        await status_msg.edit_text("تعذر قراءة الخلاصات من هذا الرابط. تأكد أن الرابط يعمل ومتاح.")
+        await status_msg.edit_text("❌ تعذر قراءة الرابط كخلاصة RSS صالحة. تأكد من صحة الرابط.")
         return
 
-    site_name = feed.feed.get("title") or "مصدر تقني"
-    last_id = getattr(feed.entries[0], 'id', getattr(feed.entries[0], 'link', '')) if feed.entries else ""
+    site_name = feed.feed.get("title") or "مصدر إخباري"
+    # أخذ أحدث مقال فوراً لحفظه كمرجع للفحص القادم دون إرسال القديم
+    last_id = get_entry_id(feed.entries[0]) if feed.entries else ""
 
     new_entry = {
         "id": int(time.time()),
@@ -459,7 +475,7 @@ async def process_and_add_url(raw_url: str, update: Update):
     await save_config_async()
 
     await status_msg.edit_text(
-        f"تمت إضافة المصدر بنجاح!\nالاسم: {site_name}\nالرابط: {final_url}",
+        f"✅ تمت إضافة الموقع وحفظ آخر مقال كمرجع بنجاح!\nالاسم: {site_name}\nالرابط: {final_url}",
         reply_markup=get_main_keyboard()
     )
 
@@ -482,61 +498,66 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             cleaned = "https://" + cleaned
         await process_and_add_url(cleaned, update)
 
-# ==================== دورة فحص المواقع الذكية بالتوالي ====================
-async def process_feeds_cycle(app, target_chat_override=None, announce=True):
+# ==================== دورة فحص المواقع (صامتة بالكامل) ====================
+async def process_feeds_cycle(app, target_chat_override=None) -> int:
     sites = CONFIG.get("sites", [])
     if not sites:
-        return
+        return 0
 
-    # تحديد الوجهة: إما يدوية، أو آخر مجموعة نشطة فقط
-    target_chat = target_chat_override or CONFIG.get("active_group_id")
+    target_chat = target_chat_override or CONFIG.get("active_chat_id")
     if not target_chat:
-        return
-
-    # إرسال إشعار البدء فقط للوجهة المحددة
-    if announce:
-        try:
-            await app.bot.send_message(target_chat, "سيتم الفحص الدوري الآن...")
-        except Exception:
-            pass
+        return 0
 
     text_mode = CONFIG.get("text_mode", "full")
     video_mode = CONFIG.get("video_mode", "file")
+    total_new_items = 0
+    config_modified = False
 
-    # فحص موقع تلو الآخر بالتوالي لضمان الدقة وتفادي أي ضغط
     for site in sites:
         try:
             feed, _ = await asyncio.to_thread(parse_feed_robust, site["url"])
             if not feed or not feed.entries:
                 continue
 
+            latest_entry = feed.entries[0]
+            latest_id = get_entry_id(latest_entry)
+
+            # الشرط المطلوب: إذا لم يكن هناك مقال مسجل (أول فحص)، نحفظه ولا نرسل شيئاً
+            if not site.get("last_id"):
+                site["last_id"] = latest_id
+                config_modified = True
+                continue
+
+            # في الفحوصات التالية: نبحث عن كل ما هو أحدث من المقال المحفوظ
             new_items = []
             for entry in feed.entries:
-                e_id = getattr(entry, 'id', getattr(entry, 'link', ''))
+                e_id = get_entry_id(entry)
                 if e_id == site.get("last_id"):
                     break
                 new_items.append(entry)
 
             if new_items:
+                total_new_items += len(new_items)
+                # إرسال المقالات من الأقدم للأحدث بالترتيب
                 for entry in reversed(new_items):
                     title = entry.get("title", "بدون عنوان").strip()
                     link = entry.get("link", "").strip()
                     pub_date = parse_date(entry)
 
                     if text_mode == "title":
-                        msg_body = f"منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\nالرابط: {link}"
+                        msg_body = f"📢 منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\nالرابط: {link}"
                     elif text_mode == "summary":
                         raw_summary = entry.get('summary', '') or entry.get('description', '')
                         clean_summary = BeautifulSoup(raw_summary, "html.parser").get_text(separator=" ", strip=True)[:350]
-                        msg_body = f"منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\n\nالملخص:\n{clean_summary}...\n\nالرابط: {link}"
+                        msg_body = f"📢 منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\n\nالملخص:\n{clean_summary}...\n\nالرابط: {link}"
                     else:
                         body = await asyncio.to_thread(extract_article_text, entry, link)
                         msg_body = (
-                            f"المصدر: {site['name']}\n\n"
+                            f"📌 المصدر: {site['name']}\n\n"
                             f"العنوان: {title}\n\n"
-                            f"نص الموضوع:\n{body[:3500]}\n\n"
+                            f"الموضوع:\n{body[:3500]}\n\n"
                             f"الوقت: {pub_date}\n"
-                            f"رابط الويب: {link}"
+                            f"الرابط: {link}"
                         )
 
                     is_video_post = ("youtube.com" in link or "youtu.be" in link)
@@ -571,45 +592,64 @@ async def process_feeds_cycle(app, target_chat_override=None, announce=True):
                         try:
                             await app.bot.send_message(chat_id=target_chat, text=msg_body)
                         except Exception as me:
-                            logger.error(f"فشل إرسال المقال إلى {target_chat}: {me}")
+                            logger.error(f"فشل إرسال الرسالة إلى {target_chat}: {me}")
 
-                    site["last_id"] = getattr(feed.entries[0], 'id', getattr(feed.entries[0], 'link', ''))
-                    await save_config_async()
+                    await asyncio.sleep(0.5)
 
-            # انتظار هادئ ربع ثانية بين كل موقع وموقع لمنع حظر تيليجرام
-            await asyncio.sleep(0.3)
+                # تحديث آخر مقال وحفظه في الإعدادات
+                site["last_id"] = latest_id
+                config_modified = True
+
+            await asyncio.sleep(0.2)
 
         except Exception as se:
-            logger.error(f"خطأ فحص {site.get('name')}: {se}")
+            logger.error(f"خطأ فحص موقع {site.get('name')}: {se}")
 
-    if announce:
-        try:
-            await app.bot.send_message(target_chat, "اكتمل فحص جميع المواقع بنجاح.")
-        except Exception:
-            pass
+    if config_modified:
+        await save_config_async()
 
-# ==================== الفحص الدوري التلقائي ====================
+    return total_new_items
+
+# ==================== الفحص الدوري الصامت والدقيق ====================
 async def background_loop(app):
-    await asyncio.sleep(15)
+    await asyncio.sleep(5)
     while True:
         try:
-            # يفحص ويرسل تلقائياً لآخر مجموعة نشطة فقط
-            await process_feeds_cycle(app, announce=True)
+            # التحقق من المدة الزمنية المتبقية للخادم (إيقاف قبل الوصول للحد لتسليم السيرفر التالي)
+            if time.time() - START_TIME >= MAX_SERVER_LIFETIME:
+                logger.info("⏳ انتهت فترة الـ 5 ساعات المحددة، جاري الإغلاق النظيف لإفساح المجال للجلسة المجدولة...")
+                os._exit(0)
+
+            interval_seconds = max(60, CONFIG.get("check_interval_minutes", 10) * 60)
+            last_check = CONFIG.get("last_check_timestamp", 0)
+            now = time.time()
+            elapsed = now - last_check
+
+            # فحص دقيق محسوب بالثانية دون أي تقديم أو تأخير
+            if elapsed >= interval_seconds:
+                CONFIG["last_check_timestamp"] = now
+                await save_config_async()
+                
+                # فحص صامت تماماً دون إرسال أي إشعار إن لم يكن هناك جديد
+                await process_feeds_cycle(app)
+
+            # فحص كل 10 ثوانٍ ليكون متزامناً بدقة شديدة مع الإعدادات
+            await asyncio.sleep(10)
+
         except Exception as e:
-            logger.error(f"خطأ الفحص الدوري: {e}")
-        interval_secs = max(60, CONFIG.get("check_interval_minutes", 10) * 60)
-        await asyncio.sleep(interval_secs)
+            logger.error(f"خطأ في حلقة الفحص: {e}")
+            await asyncio.sleep(10)
 
 async def on_post_init(app):
     asyncio.create_task(background_loop(app))
-    logger.info("✅ تم بدء حلقة الفحص المتتالية بنجاح.")
+    logger.info("✅ تم بدء الجدولة الدقيقة بنجاح.")
 
-# ==================== تشغيل التطبيق ====================
+# ==================== التشغيل ====================
 def main():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .concurrent_updates(16)
+        .concurrent_updates(8)
         .post_init(on_post_init)
         .build()
     )
@@ -617,9 +657,9 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.ALL, handle_any_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
 
-    print("🚀 تم تشغيل البوت بنجاح! البوت الآن فائق الاستجابة وبدون أي تهنيج...")
+    print("🚀 تم تشغيل البوت بنجاح! الفحص صامت، الأزرار مستجيبة، والتوقيت دقيق جداً.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
