@@ -9,7 +9,14 @@
     "video_mode": "file",
     "photo_mode": "file"
   },
-  "sites": [],
+  "sites": [
+    {
+      "id": 1793767726,
+      "name": "عالم الكمبيوتر",
+      "url": "https://www.computer-wd.com/feeds/posts/default?alt=rss",
+      "last_id": "tag:blogger.com,1999:blog-2845471504392465335.post-2532486199447943422"
+    }
+  ],
   "registered_chats": [
     6701042883,
     -5524839448
