@@ -2,7 +2,7 @@ name: Run Telegram RSS and Media Downloader Bot
 
 on:
   schedule:
-    # إعادة تشغيل البوت كل 5 ساعات لضمان بقائه حياً 24/7 دون توقف
+    # إعادة تشغيل البوت تلقائياً كل 5 ساعات لضمان العمل المستمر
     - cron: '0 */5 * * *'
   push:
     branches: [ main ]
@@ -24,7 +24,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # تنظيف أي جلسة سابقة لتفادي تشغيل نسختين في نفس الوقت
+      # تنظيف وإغلاق أي جلسات قديمة
       - name: Cancel older runs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,28 +37,28 @@ jobs:
           done
           sleep 2
 
-      # تثبيت FFmpeg لتقسيم الفيديوهات ومعالجة الصوت
+      # تثبيت FFmpeg
       - name: Install FFmpeg
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ffmpeg
 
-      # تثبيت بيئة بايثون 3.10
+      # تثبيت بايثون 3.10
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      # تثبيت المكتبات وتحديث yt-dlp بأحدث إصدار لتخطي قيود يوتيوب
+      # تثبيت وتحديث المكتبات
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade yt-dlp
 
-      # تشغيل البوت مع تمرير السيكريت
+      # تشغيل البوت مع تمرير السيكريت بأي اسم كان
       - name: Run Bot
         env:
-          BOT_SECRET: ${{ secrets['3bot'] || secrets.BOT_SECRET }}
+          BOT_SECRET: ${{ secrets.BOT_SECRET || secrets['3bot'] || secrets.BOT_TOKEN }}
         run: python bot.py
