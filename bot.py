@@ -34,34 +34,68 @@ from telegram.ext import (
     filters,
 )
 
-# ==================== الإعدادات والسجلات ====================
+# ==================== إعداد السجلات ====================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# استخراج التوكنات من السيكريت المشترك: BOT_TOKEN\GITHUB_TOKEN
-SECRET_RAW = os.environ.get("BOT_SECRET") or os.environ.get("3bot")
-if not SECRET_RAW or "\\" not in SECRET_RAW:
-    logger.error("❌ لم يتم العثور على السيكريت بالصيغة المطلوبة: BOT_TOKEN\\GITHUB_TOKEN")
-    sys.exit(1)
+# ==================== قراءة التوكنات بذكاء وتفادي الأخطاء ====================
+SECRET_RAW = (
+    os.environ.get("BOT_SECRET")
+    or os.environ.get("3bot")
+    or os.environ.get("BOT_TOKEN")
+    or ""
+).strip()
 
-BOT_TOKEN, GITHUB_TOKEN = SECRET_RAW.split("\\", 1)
-BOT_TOKEN = BOT_TOKEN.strip()
-GITHUB_TOKEN = GITHUB_TOKEN.strip()
+BOT_TOKEN = None
+GITHUB_TOKEN = None
+
+# فحص الفاصل تلقائياً سواء كان \ أو / أو سطر جديد
+for sep in ["\\", "/", "\n", "|"]:
+    if sep in SECRET_RAW:
+        parts = SECRET_RAW.split(sep, 1)
+        BOT_TOKEN = parts[0].strip()
+        GITHUB_TOKEN = parts[1].strip()
+        break
+
+if not BOT_TOKEN:
+    BOT_TOKEN = SECRET_RAW
+
+if not BOT_TOKEN:
+    logger.error("❌ لم يتم العثور على توكن البوت في السيكريت!")
+    sys.exit(1)
 
 REPO_OWNER = "ahmedhassan2382006-art"
 REPO_NAME = "Articles"
 CONFIG_FILE_PATH = "config.json"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{CONFIG_FILE_PATH}"
 
-MAX_TELEGRAM_FILE_SIZE = 49 * 1024 * 1024  # 49 ميجابايت كحد أقصى للرفع المباشر
+MAX_TELEGRAM_FILE_SIZE = 49 * 1024 * 1024
 
 # ==================== مزامنة GitHub API لملف config.json ====================
 GITHUB_FILE_SHA = None
 
 def get_remote_config():
     global GITHUB_FILE_SHA
+    default_cfg = {
+        "check_interval_minutes": 10,
+        "text_mode": "full",
+        "video_mode": "file",
+        "photo_mode": "file",
+        "registered_chats": [],
+        "sites": []
+    }
+
+    if not GITHUB_TOKEN:
+        if os.path.exists("config.json"):
+            try:
+                with open("config.json", "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return default_cfg
+
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
@@ -77,18 +111,20 @@ def get_remote_config():
     except Exception as e:
         logger.error(f"خطأ أثناء قراءة إعدادات جيت هب: {e}")
 
-    # إعدادات افتراضية في حالة عدم توفر الملف
-    return {
-        "check_interval_minutes": 10,
-        "text_mode": "full",      # full, summary, title
-        "video_mode": "file",     # file, link
-        "photo_mode": "file",
-        "registered_chats": [],   # معرفات المحادثات (المجموعات والقنوات)
-        "sites": []               # قائمة الروابط
-    }
+    return default_cfg
 
 def save_remote_config(new_config: dict):
     global GITHUB_FILE_SHA
+    # حفظ محلي دائماً كاحتياط
+    try:
+        with open("config.json", "w", encoding="utf-8") as f:
+            json.dump(new_config, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    if not GITHUB_TOKEN:
+        return True
+
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
@@ -105,15 +141,12 @@ def save_remote_config(new_config: dict):
         res = requests.put(GITHUB_API_URL, headers=headers, json=payload, timeout=10)
         if res.status_code in (200, 201):
             GITHUB_FILE_SHA = res.json().get("content", {}).get("sha", GITHUB_FILE_SHA)
-            logger.info("✅ تم تحديث ملف config.json على جيت هب بنجاح.")
+            logger.info("✅ تم تحديث config.json على جيت هب.")
             return True
-        else:
-            logger.error(f"فشل تحديث جيت هب: {res.text}")
     except Exception as e:
-        logger.error(f"خطأ أثناء حفظ الإعدادات في جيت هب: {e}")
+        logger.error(f"خطأ حفظ الإعدادات في جيت هب: {e}")
     return False
 
-# تحميل الإعدادات عند البدء
 CONFIG = get_remote_config()
 
 # ==================== أدوات معالجة المقالات والنصوص ====================
@@ -154,7 +187,7 @@ def extract_article_text(entry, link: str) -> str:
             pass
     return "نص الموضوع متاح عبر الرابط المرفق."
 
-# ==================== محرك تنزيل الفيديوهات وتقطيعها عبر FFmpeg ====================
+# ==================== تنزيل الفيديوهات وتقطيعها عبر FFmpeg ====================
 YTDL_BASE_OPTS = {
     "quiet": True,
     "no_warnings": True,
@@ -169,7 +202,6 @@ YTDL_BASE_OPTS = {
 }
 
 def download_video_stream(url: str, out_folder: str) -> str:
-    """تحميل الفيديو بأعلى سرعة ممكنة"""
     out_tmpl = os.path.join(out_folder, "%(id)s.%(ext)s")
     opts = dict(YTDL_BASE_OPTS)
     opts.update({
@@ -183,18 +215,19 @@ def download_video_stream(url: str, out_folder: str) -> str:
         return ydl.prepare_filename(info)
 
 def split_video_ffmpeg(filepath: str, max_chunk_bytes: int = MAX_TELEGRAM_FILE_SIZE) -> List[str]:
-    """تقطيع الفيديو إذا تجاوز 49 ميجا بسرعة فائقة بدون إعادة ترميز"""
     filesize = os.path.getsize(filepath)
     if filesize <= max_chunk_bytes:
         return [filepath]
 
-    # حساب مدة الفيديو عبر ffprobe
     cmd_dur = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", filepath
     ]
-    res = subprocess.run(cmd_dur, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    duration = float(res.stdout.strip())
+    try:
+        res = subprocess.run(cmd_dur, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        duration = float(res.stdout.strip())
+    except Exception:
+        duration = 600.0
 
     num_parts = math.ceil(filesize / (max_chunk_bytes * 0.92))
     part_duration = duration / num_parts
@@ -248,7 +281,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 **أهلاً بك يا {name} في بوت المتابعة الذكي!**\n"
         f"المستودع المرتبط: `{REPO_OWNER}/{REPO_NAME}`\n"
-        f"يتم حفظ وتحديث كافة الروابط مباشرة على جيت هب.\n\n"
+        f"يتم حفظ وتحديث كافة الروابط تلقائياً.\n\n"
         f"👇 **اختر من لوحة التحكم:**",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
@@ -291,7 +324,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         site_id = data[4:]
         CONFIG["sites"] = [s for s in CONFIG.get("sites", []) if str(s.get("id")) != site_id]
         save_remote_config(CONFIG)
-        await query.edit_message_text("✅ **تم حذف الموقع وتحديث ملف config.json على جيت هب بنجاح!**", reply_markup=get_main_keyboard())
+        await query.edit_message_text("✅ **تم حذف الموقع بنجاح!**", reply_markup=get_main_keyboard())
 
     elif data == "settings":
         await query.edit_message_text("⚙️ **إعدادات البوت والتحكم في المحتوى:**", reply_markup=get_settings_keyboard())
@@ -382,7 +415,6 @@ async def process_feeds_cycle(app):
                 link = entry.get("link", "").strip()
                 pub_date = parse_date(entry)
 
-                # تنسيق نص الرسالة
                 if text_mode == "title":
                     msg_body = f"🔔 **منشور جديد من {site['name']}**\n\n📌 {title}\n🕒 {pub_date}\n🔗 {link}"
                 elif text_mode == "summary":
@@ -399,14 +431,12 @@ async def process_feeds_cycle(app):
                         f"🔗 **رابط صفحة الويب:** {link}"
                     )
 
-                # فحص وجود فيديو يوتيوب أو ملف وسائط
                 is_video_post = ("youtube.com" in link or "youtu.be" in link)
                 download_done = False
 
                 if is_video_post and video_mode == "file":
                     temp_dir = tempfile.mkdtemp()
                     try:
-                        # تحميل وتقطيع وحساب الحجم بأعلى سرعة
                         downloaded_file = await asyncio.to_thread(download_video_stream, link, temp_dir)
                         if downloaded_file and os.path.exists(downloaded_file):
                             parts = await asyncio.to_thread(split_video_ffmpeg, downloaded_file)
@@ -428,7 +458,6 @@ async def process_feeds_cycle(app):
                     except Exception as ve:
                         logger.error(f"خطأ تحميل/تقطيع الفيديو: {ve}")
                     finally:
-                        # حذف كافة الملفات المؤقتة فوراً لتوفير مساحة السيرفر
                         shutil.rmtree(temp_dir, ignore_errors=True)
 
                 if not download_done:
@@ -444,9 +473,20 @@ async def process_feeds_cycle(app):
         except Exception as se:
             logger.error(f"خطأ أثناء فحص {site.get('name')}: {se}")
 
-# ==================== مهمة التكرار الخلفي ====================
-async def recurring_check_job(context: ContextTypes.DEFAULT_TYPE):
-    await process_feeds_cycle(context.application)
+# ==================== مهمة الفحص الدوري المدمجة (بدون مكتبات خارجية) ====================
+async def background_loop(app):
+    await asyncio.sleep(10)
+    while True:
+        try:
+            await process_feeds_cycle(app)
+        except Exception as e:
+            logger.error(f"خطأ في حلقة الفحص: {e}")
+        interval_secs = max(60, CONFIG.get("check_interval_minutes", 10) * 60)
+        await asyncio.sleep(interval_secs)
+
+async def on_post_init(app):
+    asyncio.create_task(background_loop(app))
+    logger.info("✅ تم بدء حلقة الفحص التلقائية المدمجة بنجاح.")
 
 # ==================== تشغيل التطبيق ====================
 def main():
@@ -454,6 +494,7 @@ def main():
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .concurrent_updates(10)
+        .post_init(on_post_init)
         .build()
     )
 
@@ -461,11 +502,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_input))
 
-    # ضبط الفحص الدوري المجدول
-    interval_seconds = CONFIG.get("check_interval_minutes", 10) * 60
-    app.job_queue.run_repeating(recurring_check_job, interval=interval_seconds, first=15)
-
-    print("🚀 تم تشغيل البوت وربطه بالسحابة بنجاح! جاري استقبال التحديثات...")
+    print("🚀 تم تشغيل البوت بنجاح ومزامنة الإعدادات! جاري استقبال الرسائل...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
