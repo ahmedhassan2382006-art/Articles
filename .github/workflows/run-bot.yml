@@ -2,10 +2,15 @@ name: Run Telegram RSS and Media Downloader Bot
 
 on:
   schedule:
-    # إعادة تشغيل البوت تلقائياً كل 5 ساعات لضمان العمل المستمر
+    # إعادة تشغيل البوت تلقائياً كل 5 ساعات بالدقيقة
     - cron: '0 */5 * * *'
   push:
     branches: [ main ]
+    # هام جداً لمنع إعادة التشغيل اللانهائي كلما قام البوت بتحديث الإعدادات
+    paths-ignore:
+      - 'config.json'
+      - 'README.md'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
@@ -19,12 +24,13 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 310
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # تنظيف وإغلاق أي جلسات قديمة
+      # إلغاء الجلسات السابقة بأمان
       - name: Cancel older runs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,7 +63,7 @@ jobs:
           pip install -r requirements.txt
           pip install --upgrade yt-dlp
 
-      # تشغيل البوت مع تمرير السيكريت بأي اسم كان
+      # تشغيل البوت
       - name: Run Bot
         env:
           BOT_SECRET: ${{ secrets.BOT_SECRET || secrets['3bot'] || secrets.BOT_TOKEN }}
