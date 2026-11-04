@@ -25,6 +25,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -80,17 +81,18 @@ BROWSER_HEADERS = {
     "Pragma": "no-cache"
 }
 
-# ==================== مزامنة GitHub API بدون تجميد البوت ====================
+# قفل الحفظ لمنع تعارض وتجميد طلبات GitHub API
+CONFIG_LOCK = asyncio.Lock()
 GITHUB_FILE_SHA = None
 
+# ==================== مزامنة GitHub API بأمان تام ====================
 def _sync_get_config():
     global GITHUB_FILE_SHA
     default_cfg = {
         "check_interval_minutes": 10,
         "text_mode": "full",
         "video_mode": "file",
-        "photo_mode": "file",
-        "registered_chats": [],
+        "active_group_id": None,  # آخر مجموعة نشطة يرسل لها حصراً
         "sites": []
     }
 
@@ -155,9 +157,25 @@ def _sync_save_config(new_config: dict):
 CONFIG = _sync_get_config()
 
 async def save_config_async():
-    await asyncio.to_thread(_sync_save_config, CONFIG)
+    async with CONFIG_LOCK:
+        await asyncio.to_thread(_sync_save_config, CONFIG)
 
-# ==================== فحص الـ RSS المطور وتخطي الحظر ====================
+# دالة ذكية لتحديث رسائل الأزرار بأمان وتفادي تعليق تليجرام
+async def safe_edit_text(query, text, reply_markup=None):
+    try:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            pass
+        else:
+            try:
+                await query.message.reply_text(text=text, reply_markup=reply_markup)
+            except Exception:
+                pass
+    except Exception as ex:
+        logger.error(f"خطأ تعديل الرسالة: {ex}")
+
+# ==================== فحص الـ RSS السريع ====================
 def parse_feed_robust(url: str):
     url = url.strip()
     try:
@@ -295,13 +313,13 @@ def get_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة موقع", callback_data="add_site"), InlineKeyboardButton("🗑️ حذف موقع", callback_data="del_site")],
         [InlineKeyboardButton("📋 عرض المواقع", callback_data="list_sites"), InlineKeyboardButton("⚙️ الإعدادات المتقدمة", callback_data="settings")],
-        [InlineKeyboardButton("🔄 فحص فوري لكافة المصادر", callback_data="force_check")]
+        [InlineKeyboardButton("🔄 فحص فوري الآن", callback_data="force_check")]
     ])
 
 def get_settings_keyboard():
     s = CONFIG
-    t_labels = {"full": "📄 النص كاملاً", "summary": "📝 ملخص فقط", "title": "📌 العنوان فقط"}
-    v_labels = {"file": "🎬 إرسال كفيديو مجزأ", "link": "🔗 إرسال كرابط فقط"}
+    t_labels = {"full": "النص كاملاً", "summary": "ملخص فقط", "title": "العنوان فقط"}
+    v_labels = {"file": "إرسال كفيديو مجزأ", "link": "إرسال كرابط"}
     
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"عرض المنشورات: {t_labels.get(s.get('text_mode'), 'كامل')}", callback_data="toggle_text")],
@@ -311,92 +329,98 @@ def get_settings_keyboard():
     ])
 
 # ==================== الأوامر ومعالجة الرسائل ====================
-async def register_chat_if_needed(chat_id):
-    if chat_id not in CONFIG.get("registered_chats", []):
-        CONFIG.setdefault("registered_chats", []).append(chat_id)
-        await save_config_async()
+async def update_active_chat(chat):
+    """تحديث المجموعة النشطة تلقائياً لتكون الوجهة الوحيدة للبث التلقائي"""
+    if chat.type in ["group", "supergroup", "channel"]:
+        if CONFIG.get("active_group_id") != chat.id:
+            CONFIG["active_group_id"] = chat.id
+            await save_config_async()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await register_chat_if_needed(chat_id)
-
+    await update_active_chat(update.effective_chat)
     name = update.effective_user.first_name or "يا بطل"
     await update.message.reply_text(
-        f"👋 **أهلاً بك يا {name} في بوت المتابعة الذكي!**\n"
-        f"المستودع: `{REPO_OWNER}/{REPO_NAME}`\n"
-        f"تم تفعيل هذا الشات بنجاح.\n\n"
-        f"💡 لإضافة أي موقع في المجموعة أو الخاص، اكتب:\n"
-        f"`/add رابط_الموقع` أو ابدأ الرابط بـ `/`\n\n"
-        f"👇 **لوحة التحكم السريعة:**",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
+        f"مرحباً بك يا {name} في بوت المتابعة المطور!\n"
+        f"المستودع: {REPO_OWNER}/{REPO_NAME}\n\n"
+        f"تم تعيين هذه المحادثة كوجهة أساسية.\n"
+        f"لإضافة أي موقع اكتب:\n/add رابط_الموقع\nأو أرسل الرابط مسبوقاً بـ /\n\n"
+        f"اختر من لوحة التحكم:",
+        reply_markup=get_main_keyboard()
     )
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await register_chat_if_needed(chat_id)
-
+    await update_active_chat(update.effective_chat)
     raw_text = update.message.text.strip()
     match = re.search(r'(https?://[^\s]+)', raw_text)
     if not match:
-        await update.message.reply_text("❌ يرجى كتابة الرابط بجوار الأمر، مثال:\n`/add https://example.com/feed`", parse_mode="Markdown")
+        await update.message.reply_text("يرجى كتابة الرابط بجوار الأمر، مثال:\n/add https://example.com/feed")
         return
     await process_and_add_url(match.group(1), update)
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer() # الرد فوراً لمنع تعليق الزر نهائياً
+
     data = query.data
-    await query.answer()
+    await update_active_chat(query.message.chat)
 
     if data == "main_menu":
-        await query.edit_message_text("👇 **لوحة التحكم الرئيسية:**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+        await safe_edit_text(query, "لوحة التحكم الرئيسية:", get_main_keyboard())
 
     elif data == "list_sites":
         sites = CONFIG.get("sites", [])
         if not sites:
-            await query.edit_message_text("📭 لا توجد أي مواقع مضافة حالياً.", reply_markup=get_main_keyboard())
+            await safe_edit_text(query, "لا توجد أي مواقع مضافة حالياً.", get_main_keyboard())
             return
-        text = "📋 **قائمة المواقع والروابط المتابعة:**\n\n"
+
+        # عرض بدون رموز معقدة لتجنب أي أخطاء ولتكون سريعة جداً مع قارئ الشاشة
+        text_lines = ["قائمة المواقع والروابط المتابعة:\n"]
         for idx, s in enumerate(sites, 1):
-            text += f"{idx}. 📌 **{s.get('name')}**\n🔗 `{s.get('url')}`\n\n"
-        await query.edit_message_text(text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+            text_lines.append(f"{idx}. {s.get('name')}\nالرابط: {s.get('url')}\n")
+        full_text = "\n".join(text_lines)
+
+        # تقسيم الرسالة إذا كانت طويلة جداً
+        if len(full_text) > 3800:
+            full_text = full_text[:3800] + "\n...(تم اختصار الباقي)"
+
+        await safe_edit_text(query, full_text, get_main_keyboard())
 
     elif data == "add_site":
         context.user_data["waiting_for_url"] = True
-        await query.message.reply_text("🔗 **أرسل الآن الرابط (سواء بدأ بـ / أو بدون):**")
+        await query.message.reply_text("أرسل الآن الرابط المطلوب (يمكنك كتابته مع / أو بدون):")
 
     elif data == "del_site":
         sites = CONFIG.get("sites", [])
         if not sites:
-            await query.edit_message_text("📭 لا توجد مواقع لحذفها.", reply_markup=get_main_keyboard())
+            await safe_edit_text(query, "لا توجد مواقع لحذفها.", get_main_keyboard())
             return
         buttons = []
         for s in sites:
-            buttons.append([InlineKeyboardButton(f"❌ {s.get('name')}", callback_data=f"del_{s.get('id')}")])
+            buttons.append([InlineKeyboardButton(f"❌ {s.get('name')[:30]}", callback_data=f"del_{s.get('id')}")])
         buttons.append([InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")])
-        await query.edit_message_text("🗑️ **اختر الموقع المراد حذفه نهائياً:**", reply_markup=InlineKeyboardMarkup(buttons))
+        await safe_edit_text(query, "اختر الموقع المراد حذفه نهائياً:", InlineKeyboardMarkup(buttons))
 
     elif data.startswith("del_"):
         site_id = data[4:]
         CONFIG["sites"] = [s for s in CONFIG.get("sites", []) if str(s.get("id")) != site_id]
         await save_config_async()
-        await query.edit_message_text("✅ **تم حذف الموقع بنجاح!**", reply_markup=get_main_keyboard())
+        await safe_edit_text(query, "تم حذف الموقع بنجاح!", get_main_keyboard())
 
     elif data == "settings":
-        await query.edit_message_text("⚙️ **إعدادات البوت والتحكم في المحتوى:**", reply_markup=get_settings_keyboard())
+        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
 
     elif data == "toggle_text":
         modes = ["full", "summary", "title"]
         cur = CONFIG.get("text_mode", "full")
         CONFIG["text_mode"] = modes[(modes.index(cur) + 1) % len(modes)]
         await save_config_async()
-        await query.edit_message_reply_markup(reply_markup=get_settings_keyboard())
+        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
 
     elif data == "toggle_video":
         cur = CONFIG.get("video_mode", "file")
         CONFIG["video_mode"] = "link" if cur == "file" else "file"
         await save_config_async()
-        await query.edit_message_reply_markup(reply_markup=get_settings_keyboard())
+        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
 
     elif data == "change_interval":
         intervals = [5, 10, 15, 30, 60]
@@ -404,21 +428,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = intervals.index(cur) if cur in intervals else 0
         CONFIG["check_interval_minutes"] = intervals[(idx + 1) % len(intervals)]
         await save_config_async()
-        await query.edit_message_reply_markup(reply_markup=get_settings_keyboard())
+        await safe_edit_text(query, "إعدادات البوت والتحكم في المحتوى:", get_settings_keyboard())
 
     elif data == "force_check":
-        await query.message.reply_text("⏳ **سيتم الفحص الآن...**")
-        await process_feeds_cycle(context.application, announce=False)
-        await query.message.reply_text("✅ **اكتمل فحص جميع المواقع بنجاح.**")
+        # الفحص الفوري اليدوي يعمل في نفس المكان الذي ضغط فيه الزر
+        await query.message.reply_text("جاري الفحص الآن خطوة بخطوة...")
+        await process_feeds_cycle(context.application, target_chat_override=query.message.chat_id, announce=False)
+        await query.message.reply_text("اكتمل فحص جميع المواقع بنجاح.")
 
 async def process_and_add_url(raw_url: str, update: Update):
     clean_url = raw_url.strip()
-    status_msg = await update.message.reply_text("🔍 **جاري فحص الرابط سريعاً وتخطي الحجب...**")
+    status_msg = await update.message.reply_text("جاري فحص الرابط سريعاً وتخطي الحجب...")
 
     feed, final_url = await asyncio.to_thread(parse_feed_robust, clean_url)
 
     if not feed or (not feed.entries and len(feed.feed) == 0):
-        await status_msg.edit_text("❌ **تعذر قراءة الخلاصات من هذا الرابط.** تأكد أن الرابط يعمل ومتاح.")
+        await status_msg.edit_text("تعذر قراءة الخلاصات من هذا الرابط. تأكد أن الرابط يعمل ومتاح.")
         return
 
     site_name = feed.feed.get("title") or "مصدر تقني"
@@ -434,24 +459,19 @@ async def process_and_add_url(raw_url: str, update: Update):
     await save_config_async()
 
     await status_msg.edit_text(
-        f"✅ **تمت إضافة المصدر بنجاح!**\n📌 **الاسم:** {site_name}\n🔗 `{final_url}`",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
+        f"تمت إضافة المصدر بنجاح!\nالاسم: {site_name}\nالرابط: {final_url}",
+        reply_markup=get_main_keyboard()
     )
 
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """التقاط الروابط حتى لو بدأت بـ / في المجموعات أو الخاص"""
     if not update.message or not update.message.text:
         return
 
     text = update.message.text.strip()
-    chat_id = update.effective_chat.id
-    await register_chat_if_needed(chat_id)
+    await update_active_chat(update.effective_chat)
 
-    # التحقق إن كان النص يحتوي على رابط ويب
     match = re.search(r'(https?://[^\s]+)', text)
     if match:
-        # إما أنه ضغط زر الإضافة، أو بدأ الرسالة بـ /
         if context.user_data.get("waiting_for_url") or text.startswith("/"):
             context.user_data["waiting_for_url"] = False
             await process_and_add_url(match.group(1), update)
@@ -462,26 +482,29 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             cleaned = "https://" + cleaned
         await process_and_add_url(cleaned, update)
 
-# ==================== دورة فحص المواقع بالتوالي الدقيق ====================
-async def process_feeds_cycle(app, announce=True):
+# ==================== دورة فحص المواقع الذكية بالتوالي ====================
+async def process_feeds_cycle(app, target_chat_override=None, announce=True):
     sites = CONFIG.get("sites", [])
-    chats = CONFIG.get("registered_chats", [])
-    if not sites or not chats:
+    if not sites:
         return
 
-    # إرسال إشعار بدء الفحص
+    # تحديد الوجهة: إما يدوية، أو آخر مجموعة نشطة فقط
+    target_chat = target_chat_override or CONFIG.get("active_group_id")
+    if not target_chat:
+        return
+
+    # إرسال إشعار البدء فقط للوجهة المحددة
     if announce:
-        for cid in chats:
-            try:
-                await app.bot.send_message(cid, "⏳ **سيتم الفحص الدوري الآن...**", parse_mode="Markdown")
-            except Exception:
-                pass
+        try:
+            await app.bot.send_message(target_chat, "سيتم الفحص الدوري الآن...")
+        except Exception:
+            pass
 
     text_mode = CONFIG.get("text_mode", "full")
     video_mode = CONFIG.get("video_mode", "file")
 
-    # فحص موقع موقع على التوالي وبدون تداخل
-    for idx, site in enumerate(sites, 1):
+    # فحص موقع تلو الآخر بالتوالي لضمان الدقة وتفادي أي ضغط
+    for site in sites:
         try:
             feed, _ = await asyncio.to_thread(parse_feed_robust, site["url"])
             if not feed or not feed.entries:
@@ -501,19 +524,19 @@ async def process_feeds_cycle(app, announce=True):
                     pub_date = parse_date(entry)
 
                     if text_mode == "title":
-                        msg_body = f"🔔 **منشور جديد من {site['name']}**\n\n📌 {title}\n🕒 {pub_date}\n🔗 {link}"
+                        msg_body = f"منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\nالرابط: {link}"
                     elif text_mode == "summary":
                         raw_summary = entry.get('summary', '') or entry.get('description', '')
                         clean_summary = BeautifulSoup(raw_summary, "html.parser").get_text(separator=" ", strip=True)[:350]
-                        msg_body = f"🔔 **منشور جديد من {site['name']}**\n\n📌 {title}\n🕒 {pub_date}\n\n📝 **الملخص:**\n{clean_summary}...\n\n🔗 {link}"
+                        msg_body = f"منشور جديد من {site['name']}\n\nالعنوان: {title}\nالوقت: {pub_date}\n\nالملخص:\n{clean_summary}...\n\nالرابط: {link}"
                     else:
                         body = await asyncio.to_thread(extract_article_text, entry, link)
                         msg_body = (
-                            f"🔔 **{site['name']}**\n\n"
-                            f"📌 **العنوان:** {title}\n\n"
-                            f"📝 **نص الموضوع:**\n{body[:3500]}\n\n"
-                            f"🕒 **الوقت:** {pub_date}\n"
-                            f"🔗 **رابط صفحة الويب:** {link}"
+                            f"المصدر: {site['name']}\n\n"
+                            f"العنوان: {title}\n\n"
+                            f"نص الموضوع:\n{body[:3500]}\n\n"
+                            f"الوقت: {pub_date}\n"
+                            f"رابط الويب: {link}"
                         )
 
                     is_video_post = ("youtube.com" in link or "youtu.be" in link)
@@ -527,18 +550,17 @@ async def process_feeds_cycle(app, announce=True):
                                 parts = await asyncio.to_thread(split_video_ffmpeg, downloaded_file)
                                 total_parts = len(parts)
 
-                                for c_id in chats:
-                                    for p_idx, part_path in enumerate(parts, 1):
-                                        caption = f"🎬 {title[:60]}"
-                                        if total_parts > 1:
-                                            caption += f" (الجزء {p_idx} من {total_parts})"
-                                        with open(part_path, "rb") as vf:
-                                            await app.bot.send_video(
-                                                chat_id=c_id,
-                                                video=vf,
-                                                caption=caption,
-                                                supports_streaming=True
-                                            )
+                                for p_idx, part_path in enumerate(parts, 1):
+                                    caption = f"🎬 {title[:60]}"
+                                    if total_parts > 1:
+                                        caption += f" (الجزء {p_idx} من {total_parts})"
+                                    with open(part_path, "rb") as vf:
+                                        await app.bot.send_video(
+                                            chat_id=target_chat,
+                                            video=vf,
+                                            caption=caption,
+                                            supports_streaming=True
+                                        )
                                 download_done = True
                         except Exception as ve:
                             logger.error(f"خطأ تحميل الفيديو: {ve}")
@@ -546,34 +568,32 @@ async def process_feeds_cycle(app, announce=True):
                             shutil.rmtree(temp_dir, ignore_errors=True)
 
                     if not download_done:
-                        for c_id in chats:
-                            try:
-                                await app.bot.send_message(chat_id=c_id, text=msg_body)
-                            except Exception as me:
-                                logger.error(f"فشل إرسال المقال إلى {c_id}: {me}")
+                        try:
+                            await app.bot.send_message(chat_id=target_chat, text=msg_body)
+                        except Exception as me:
+                            logger.error(f"فشل إرسال المقال إلى {target_chat}: {me}")
 
                     site["last_id"] = getattr(feed.entries[0], 'id', getattr(feed.entries[0], 'link', ''))
                     await save_config_async()
 
-            # انتظار بسيط ومريح بين كل موقع والآخر لضمان عدم حظر تيليجرام
-            await asyncio.sleep(0.5)
+            # انتظار هادئ ربع ثانية بين كل موقع وموقع لمنع حظر تيليجرام
+            await asyncio.sleep(0.3)
 
         except Exception as se:
             logger.error(f"خطأ فحص {site.get('name')}: {se}")
 
-    # إشعار انتهاء الفحص
     if announce:
-        for cid in chats:
-            try:
-                await app.bot.send_message(cid, "✅ **اكتمل فحص جميع المواقع بنجاح.**", parse_mode="Markdown")
-            except Exception:
-                pass
+        try:
+            await app.bot.send_message(target_chat, "اكتمل فحص جميع المواقع بنجاح.")
+        except Exception:
+            pass
 
-# ==================== الفحص الدوري الخلفي ====================
+# ==================== الفحص الدوري التلقائي ====================
 async def background_loop(app):
     await asyncio.sleep(15)
     while True:
         try:
+            # يفحص ويرسل تلقائياً لآخر مجموعة نشطة فقط
             await process_feeds_cycle(app, announce=True)
         except Exception as e:
             logger.error(f"خطأ الفحص الدوري: {e}")
@@ -597,10 +617,9 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    # التقاط أي رسالة تبدأ بـ / أو روابط
     app.add_handler(MessageHandler(filters.ALL, handle_any_message))
 
-    print("🚀 تم تشغيل البوت بنجاح! البوت الآن فائق السرعة وجاهز...")
+    print("🚀 تم تشغيل البوت بنجاح! البوت الآن فائق الاستجابة وبدون أي تهنيج...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
