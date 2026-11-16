@@ -2,13 +2,14 @@ name: Run Telegram RSS and Media Downloader Bot
 
 on:
   schedule:
-    # إعادة تشغيل البوت تلقائياً كل 5 ساعات بالدقيقة
+    # إعادة تشغيل البوتين تلقائياً كل 5 ساعات بالدقيقة
     - cron: '0 */5 * * *'
   push:
     branches: [ main ]
-    # هام جداً لمنع إعادة التشغيل اللانهائي كلما قام البوت بتحديث الإعدادات
+    # هام جداً لمنع إعادة التشغيل اللانهائي كلما قام البوتان بتحديث الإعدادات أو الأصوات
     paths-ignore:
       - 'config.json'
+      - 's.json'
       - 'README.md'
       - '.gitignore'
   workflow_dispatch:
@@ -63,8 +64,14 @@ jobs:
           pip install -r requirements.txt
           pip install --upgrade yt-dlp
 
-      # تشغيل البوت
-      - name: Run Bot
+      # تشغيل البوت الأول والبوت الثاني معاً في نفس الجلسة
+      - name: Run Bots
         env:
           BOT_SECRET: ${{ secrets.BOT_SECRET || secrets['3bot'] || secrets.BOT_TOKEN }}
-        run: python bot.py
+        run: |
+          python bot.py &
+          PID1=$!
+          python bot2.py &
+          PID2=$!
+          wait $PID1 || true
+          wait $PID2 || true
