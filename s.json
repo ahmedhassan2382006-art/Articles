@@ -1,4 +1,12 @@
 {
-  "channels": {},
+  "channels": {
+    "-1002527184826": {
+      "title": "Sky Stars",
+      "linked_group_id": -1002383098026,
+      "linked_group_title": "⁨Sky Stars⁩ محادثة",
+      "last_known_msg_id": 0,
+      "posts": {}
+    }
+  },
   "group_post_map": {}
 }
