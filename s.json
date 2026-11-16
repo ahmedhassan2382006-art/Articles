@@ -4,7 +4,7 @@
       "title": "Sky Stars",
       "linked_group_id": -1002383098026,
       "linked_group_title": "⁨Sky Stars⁩ محادثة",
-      "last_known_msg_id": 28,
+      "last_known_msg_id": 30,
       "posts": {
         "28": {
           "likes": 0,
@@ -12,13 +12,80 @@
           "voters": {},
           "group_id": -1002383098026,
           "group_msg_id": 34
+        },
+        "19": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": null,
+          "group_msg_id": null
+        },
+        "22": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": null,
+          "group_msg_id": null
+        },
+        "23": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": null,
+          "group_msg_id": null
+        },
+        "24": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": null,
+          "group_msg_id": null
+        },
+        "25": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": null,
+          "group_msg_id": null
+        },
+        "26": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": null,
+          "group_msg_id": null
+        },
+        "27": {
+          "likes": 1,
+          "dislikes": 0,
+          "voters": {
+            "6701042883": "l"
+          },
+          "group_id": null,
+          "group_msg_id": null
+        },
+        "29": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": -1002383098026,
+          "group_msg_id": 35
+        },
+        "30": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": -1002383098026,
+          "group_msg_id": 36
         }
       },
       "can_edit_messages": true
     }
   },
   "group_post_map": {
-    "-1002383098026:34": "-1002527184826:28"
+    "-1002383098026:34": "-1002527184826:28",
+    "-1002383098026:35": "-1002527184826:29",
+    "-1002383098026:36": "-1002527184826:30"
   },
   "owner_id": 6701042883,
   "is_running": true,
