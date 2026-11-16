@@ -2,14 +2,14 @@ name: Run Telegram RSS and Media Downloader Bot
 
 on:
   schedule:
-    # إعادة تشغيل البوتين تلقائياً كل 5 ساعات بالدقيقة
+    # إعادة تشغيل البوت تلقائياً كل 5 ساعات
     - cron: '0 */5 * * *'
   push:
     branches: [ main ]
-    # هام جداً لمنع إعادة التشغيل اللانهائي كلما قام البوتان بتحديث الإعدادات أو الأصوات
     paths-ignore:
       - 'config.json'
       - 's.json'
+      - 'bot2.py'
       - 'README.md'
       - '.gitignore'
   workflow_dispatch:
@@ -31,14 +31,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # إلغاء الجلسات السابقة بأمان
+      # إلغاء الجلسات السابقة الخاصة بالبوت القديم فقط
       - name: Cancel older runs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for run_id in $(gh run list --repo "$GITHUB_REPOSITORY" --status in_progress --json databaseId -q '.[].databaseId'); do
+          for run_id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow "${{ github.workflow }}" --status in_progress --json databaseId -q '.[].databaseId'); do
             if [ "$run_id" != "$GITHUB_RUN_ID" ]; then
-              echo "إيقاف الجلسة السابقة: $run_id"
+              echo "إيقاف الجلسة السابقة للبوت القديم: $run_id"
               gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY" || true
             fi
           done
@@ -64,14 +64,8 @@ jobs:
           pip install -r requirements.txt
           pip install --upgrade yt-dlp
 
-      # تشغيل البوت الأول والبوت الثاني معاً في نفس الجلسة
-      - name: Run Bots
+      # تشغيل البوت القديم
+      - name: Run Bot
         env:
           BOT_SECRET: ${{ secrets.BOT_SECRET || secrets['3bot'] || secrets.BOT_TOKEN }}
-        run: |
-          python bot.py &
-          PID1=$!
-          python bot2.py &
-          PID2=$!
-          wait $PID1 || true
-          wait $PID2 || true
+        run: python bot.py
