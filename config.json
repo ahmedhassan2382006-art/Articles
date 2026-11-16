@@ -14,55 +14,82 @@
       "id": 1793767726,
       "name": "عالم الكمبيوتر",
       "url": "https://www.computer-wd.com/feeds/posts/default?alt=rss",
-      "last_id": "tag:blogger.com,1999:blog-2845471504392465335.post-8629329537269999814"
+      "last_id": "tag:blogger.com,1999:blog-2845471504392465335.post-8629329537269999814",
+      "topics": {
+        "-1003924183926": 4058
+      }
     },
     {
       "id": 1793768709,
       "name": "اخبار التطبيقات والتقنية",
       "url": "https://arabapps.org/feed/",
-      "last_id": "https://www.arabapps.org/?p=534060"
+      "last_id": "https://www.arabapps.org/?p=534060",
+      "topics": {
+        "-1003924183926": 4059
+      }
     },
     {
       "id": 1793802556,
       "name": "مصدر إخباري",
       "url": "https://aitnews.com/feed/",
-      "last_id": "https://aitnews.com/?p=609394"
+      "last_id": "https://aitnews.com/?p=609394",
+      "topics": {
+        "-1003924183926": 4060
+      }
     },
     {
       "id": 1793802618,
       "name": "التقنية بلا حدود",
       "url": "https://unlimit-tech.com/feed/",
-      "last_id": "https://www.unlimit-tech.com/?p=366346"
+      "last_id": "https://www.unlimit-tech.com/?p=366346",
+      "topics": {
+        "-1003924183926": 4061
+      }
     },
     {
       "id": 1793810546,
       "name": "Softpedia Windows / All",
       "url": "https://www.softpedia.com/backend.xml",
-      "last_id": "https://www.softpedia.com/get/Internet/Servers/Other-Servers/ChromeDriver.shtml"
+      "last_id": "https://www.softpedia.com/get/Internet/Servers/Other-Servers/ChromeDriver.shtml",
+      "topics": {
+        "-1003924183926": 4062
+      }
     },
     {
       "id": 1793810597,
       "name": "MajorGeeks.Com",
       "url": "https://www.majorgeeks.com/files/rss",
-      "last_id": "53aac2193a1769856ccdc6e6f27f50056d15a517"
+      "last_id": "53aac2193a1769856ccdc6e6f27f50056d15a517",
+      "topics": {
+        "-1003924183926": 4063
+      }
     },
     {
       "id": 1793810653,
       "name": "عرّفني",
       "url": "https://3arrafni.com/feed/",
-      "last_id": "https://3arrafni.com/tech-news/windows-11-remote-lock-intune"
+      "last_id": "https://3arrafni.com/tech-news/windows-11-remote-lock-intune",
+      "topics": {
+        "-1003924183926": 4064
+      }
     },
     {
       "id": 1793810733,
       "name": "مدونة نافذة التقنية",
       "url": "https://blog.tecwindow.net/feed/",
-      "last_id": "https://blog.tecwindow.net/?p=5823"
+      "last_id": "https://blog.tecwindow.net/?p=5823",
+      "topics": {
+        "-1003924183926": 4065
+      }
     },
     {
       "id": 1793811206,
       "name": "TechCrunch",
       "url": "https://techcrunch.com/feed/",
-      "last_id": "https://techcrunch.com/?p=3188979"
+      "last_id": "https://techcrunch.com/?p=3188979",
+      "topics": {
+        "-1003924183926": 4066
+      }
     }
   ],
   "registered_chats": [
