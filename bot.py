@@ -13,7 +13,7 @@ import subprocess
 from datetime import datetime, timezone
 import calendar
 from email.utils import parsedate_to_datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 import requests
 import feedparser
@@ -25,7 +25,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter, Forbidden, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -92,6 +92,7 @@ trans_session.headers.update({
 })
 
 CONFIG_LOCK = asyncio.Lock()
+TOPIC_LOCK = asyncio.Lock()
 GITHUB_FILE_SHA = None
 
 # اللغات المدعومة للترجمة
@@ -359,6 +360,161 @@ async def safe_edit_text(query, text, reply_markup=None):
     except Exception as ex:
         logger.error(f"خطأ تعديل الرسالة: {ex}")
 
+# ==================== إدارة المواضيع (Topics) في المجموعات ====================
+def get_clean_topic_name(name: str) -> str:
+    clean_name = re.sub(r'\s+', ' ', (name or "مصدر جديد")).strip()
+    if not clean_name:
+        clean_name = "مصدر جديد"
+    return clean_name[:128]
+
+async def is_chat_forum(bot, chat_id: int) -> bool:
+    try:
+        chat = await bot.get_chat(chat_id)
+        return bool(getattr(chat, "is_forum", False))
+    except Exception as e:
+        logger.warning(f"تعذر التحقق من خصائص المحادثة {chat_id}: {e}")
+        return False
+
+async def ensure_site_topic(bot, chat_id: int, site: dict, force_recreate: bool = False) -> Optional[int]:
+    """التأكد من وجود موضوع باسم الموقع في المجموعة، أو إنشاؤه وحفظ معرفه"""
+    if not chat_id:
+        return None
+
+    async with TOPIC_LOCK:
+        topics_map = site.setdefault("topics", {})
+        chat_key = str(chat_id)
+
+        if not force_recreate and topics_map.get(chat_key):
+            return int(topics_map[chat_key])
+
+        topic_name = get_clean_topic_name(site.get("name", "مصدر جديد"))
+
+        for attempt in range(3):
+            try:
+                forum_topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name)
+                thread_id = forum_topic.message_thread_id
+                topics_map[chat_key] = thread_id
+                logger.info(f"✅ تم إنشاء موضوع '{topic_name}' (thread_id={thread_id}) في المجموعة {chat_id}")
+                return thread_id
+            except RetryAfter as ra:
+                wait_sec = int(getattr(ra, "retry_after", 3)) + 1
+                logger.warning(f"⏳ حد تيليجرام لإنشاء المواضيع، انتظار {wait_sec} ثانية...")
+                await asyncio.sleep(wait_sec)
+            except (BadRequest, Forbidden) as e:
+                logger.error(
+                    f"❌ تعذر إنشاء موضوع للموقع '{topic_name}': {e}. "
+                    f"تأكد أن البوت مشرف ولديه صلاحية إدارة المواضيع (Manage Topics)."
+                )
+                return None
+            except TelegramError as e:
+                logger.error(f"❌ خطأ تيليجرام أثناء إنشاء موضوع '{topic_name}': {e}")
+                return None
+
+    return None
+
+async def sync_all_site_topics(bot, chat_id: int) -> Tuple[bool, int, str]:
+    """إنشاء مواضيع بأسماء جميع المواقع المحفوظة في الإعدادات إذا لم تكن منشأة"""
+    if not chat_id:
+        return False, 0, "لم يتم تحديد مجموعة أو محادثة نشطة بعد."
+
+    if not await is_chat_forum(bot, chat_id):
+        return False, 0, "المحادثة المحددة ليست مجموعة تدعم المواضيع (Topics)."
+
+    sites = CONFIG.get("sites", [])
+    if not sites:
+        return True, 0, "لا توجد مواقع مضافة حالياً في الإعدادات."
+
+    created_count = 0
+    chat_key = str(chat_id)
+
+    for site in sites:
+        topics_map = site.setdefault("topics", {})
+        if not topics_map.get(chat_key):
+            thread_id = await ensure_site_topic(bot, chat_id, site)
+            if thread_id:
+                created_count += 1
+                await asyncio.sleep(0.8)
+
+    if created_count > 0:
+        await save_config_async()
+
+    return True, created_count, f"تمت مزامنة مواضيع المواقع بنجاح (تم إنشاء {created_count} موضوع جديد)."
+
+async def send_site_message(bot, chat_id: int, site: dict, is_forum: bool, text: str) -> bool:
+    """إرسال نص المقال إلى الموضوع المخصص للموقع فقط"""
+    chat_key = str(chat_id)
+    thread_id = None
+    if is_forum:
+        had_topic = bool(site.get("topics", {}).get(chat_key))
+        thread_id = await ensure_site_topic(bot, chat_id, site)
+        if thread_id and not had_topic:
+            await save_config_async()
+
+    for attempt in range(2):
+        try:
+            kwargs = {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": False,
+            }
+            if is_forum and thread_id:
+                kwargs["message_thread_id"] = thread_id
+
+            await bot.send_message(**kwargs)
+            return True
+        except BadRequest as e:
+            err_str = str(e).lower()
+            if is_forum and attempt == 0 and ("thread" in err_str or "topic" in err_str):
+                logger.warning(f"⚠️ الموضوع القديم للموقع '{site.get('name')}' محذوف أو غير متاح، جاري إعادة إنشائه...")
+                thread_id = await ensure_site_topic(bot, chat_id, site, force_recreate=True)
+                if thread_id:
+                    await save_config_async()
+                    continue
+            logger.error(f"فشل إرسال الرسالة: {e}")
+            return False
+        except RetryAfter as ra:
+            await asyncio.sleep(int(getattr(ra, "retry_after", 3)) + 1)
+        except Exception as me:
+            logger.error(f"فشل إرسال الرسالة: {me}")
+            return False
+    return False
+
+async def send_site_video_part(bot, chat_id: int, site: dict, is_forum: bool, part_path: str, caption: str) -> bool:
+    """إرسال الفيديو إلى الموضوع المخصص للموقع فقط"""
+    chat_key = str(chat_id)
+    thread_id = None
+    if is_forum:
+        had_topic = bool(site.get("topics", {}).get(chat_key))
+        thread_id = await ensure_site_topic(bot, chat_id, site)
+        if thread_id and not had_topic:
+            await save_config_async()
+
+    for attempt in range(2):
+        try:
+            with open(part_path, "rb") as vf:
+                kwargs = {
+                    "chat_id": chat_id,
+                    "video": vf,
+                    "caption": caption,
+                    "supports_streaming": True,
+                }
+                if is_forum and thread_id:
+                    kwargs["message_thread_id"] = thread_id
+                await bot.send_video(**kwargs)
+            return True
+        except BadRequest as e:
+            err_str = str(e).lower()
+            if is_forum and attempt == 0 and ("thread" in err_str or "topic" in err_str):
+                logger.warning(f"⚠️ الموضوع القديم للموقع '{site.get('name')}' محذوف أو غير متاح، جاري إعادة إنشائه...")
+                thread_id = await ensure_site_topic(bot, chat_id, site, force_recreate=True)
+                if thread_id:
+                    await save_config_async()
+                    continue
+            raise
+        except RetryAfter as ra:
+            await asyncio.sleep(int(getattr(ra, "retry_after", 3)) + 1)
+    return False
+
 # ==================== استخراج الخلاصات والمقالات ====================
 def parse_feed_robust(url: str):
     url = url.strip()
@@ -445,7 +601,6 @@ def extract_full_article(url: str, entry=None) -> str:
         except Exception:
             pass
 
-    # إذا تعذر السحب المباشر، يتم الاعتماد على محتوى الـ RSS
     if entry:
         if 'content' in entry and len(entry.content) > 0:
             full_text = entry.content[0].get('value', '')
@@ -525,6 +680,7 @@ def get_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة موقع", callback_data="add_site"), InlineKeyboardButton("🗑️ حذف موقع", callback_data="del_site")],
         [InlineKeyboardButton("📋 عرض المواقع", callback_data="list_sites"), InlineKeyboardButton("⚙️ الإعدادات المتقدمة", callback_data="settings")],
+        [InlineKeyboardButton("🗂️ مزامنة مواضيع المواقع", callback_data="sync_topics")],
         [InlineKeyboardButton("🔄 فحص فوري الآن", callback_data="force_check")]
     ])
 
@@ -546,19 +702,43 @@ def get_settings_keyboard():
 # ==================== إدارة المحادثات والأوامر ====================
 async def update_active_chat(chat):
     if chat and chat.id:
-        if CONFIG.get("active_chat_id") != chat.id:
+        current_id = CONFIG.get("active_chat_id")
+        # إذا كان البوت مضبوطاً بالفعل على مجموعة، لا نستبدل الوجهة بمحادثة خاصة بالخطأ
+        if chat.type == "private" and current_id and int(current_id) < 0:
+            return
+        if current_id != chat.id:
             CONFIG["active_chat_id"] = chat.id
             await save_config_async()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_active_chat(update.effective_chat)
     name = update.effective_user.first_name or "يا بطل"
+    chat = update.effective_chat
+
+    topics_note = ""
+    if chat and getattr(chat, "is_forum", False):
+        ok, created, _ = await sync_all_site_topics(context.bot, chat.id)
+        if ok:
+            topics_note = f"\n🗂️ نظام المواضيع مفعل في المجموعة (تم إنشاء {created} موضوع جديد للمواقع)."
+        else:
+            topics_note = "\n⚠️ تأكد من منح البوت صلاحية إدارة المواضيع (Manage Topics)."
+
     await update.message.reply_text(
         f"مرحباً بك يا {name} في بوت المتابعة والترجمة التلقائية!\n\n"
-        f"✅ تم تعيين هذه المحادثة كوجهة أساسية.\n"
+        f"✅ تم تعيين هذه المحادثة كوجهة أساسية.{topics_note}\n"
         f"لإضافة موقع أرسل: `/add رابط_الموقع` أو اختر من اللوحة أدناه:",
         reply_markup=get_main_keyboard()
     )
+
+async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update_active_chat(update.effective_chat)
+    target_chat = CONFIG.get("active_chat_id") or update.effective_chat.id
+    status_msg = await update.message.reply_text("🗂️ جاري فحص ومزامنة مواضيع المواقع في المجموعة...")
+    ok, created, msg = await sync_all_site_topics(context.bot, target_chat)
+    if ok:
+        await status_msg.edit_text(f"✅ {msg}")
+    else:
+        await status_msg.edit_text(f"⚠️ {msg}")
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_active_chat(update.effective_chat)
@@ -589,9 +769,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_text(query, "لا توجد أي مواقع مضافة حالياً في القائمة.", back_kb)
             return
 
+        target_chat = CONFIG.get("active_chat_id") or query.message.chat_id
+        chat_key = str(target_chat)
         text_lines = ["📋 قائمة المواقع المتابعة حالياً:\n"]
         for idx, s in enumerate(sites, 1):
-            text_lines.append(f"{idx}. {s.get('name')}\nالرابط: {s.get('url')}\n")
+            has_topic = "✅ مخصص له موضوع" if s.get("topics", {}).get(chat_key) else "⏳ سيتم إنشاء موضوعه"
+            text_lines.append(f"{idx}. {s.get('name')} ({has_topic})\nالرابط: {s.get('url')}\n")
         full_text = "\n".join(text_lines)
 
         if len(full_text) > 3800:
@@ -651,11 +834,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_config_async()
         await safe_edit_text(query, "⚙️ إعدادات البوت والترجمة:", get_settings_keyboard())
 
+    elif data == "sync_topics":
+        target_chat = CONFIG.get("active_chat_id") or query.message.chat_id
+        status_msg = await query.message.reply_text("🗂️ جاري إنشاء ومزامنة مواضيع المواقع...")
+        ok, created, msg = await sync_all_site_topics(context.bot, target_chat)
+        if ok:
+            await status_msg.edit_text(f"✅ {msg}")
+        else:
+            await status_msg.edit_text(f"⚠️ {msg}")
+
     elif data == "force_check":
         status_msg = await query.message.reply_text("🔄 جاري الفحص الفوري الآن...")
-        new_found = await process_feeds_cycle(context.application, target_chat_override=query.message.chat_id)
+        target_chat = CONFIG.get("active_chat_id") or query.message.chat_id
+        new_found = await process_feeds_cycle(context.application, target_chat_override=target_chat)
         if new_found > 0:
-            await status_msg.edit_text(f"✅ اكتمل الفحص وتم إرسال {new_found} مقال/منشور جديد.")
+            await status_msg.edit_text(f"✅ اكتمل الفحص وتم إرسال {new_found} مقال/منشور جديد إلى مواضيعها المخصصة.")
         else:
             await status_msg.edit_text("✅ تم الفحص، لا توجد أي مقالات جديدة.")
 
@@ -676,13 +869,25 @@ async def process_and_add_url(raw_url: str, update: Update):
         "id": int(time.time()),
         "name": site_name,
         "url": final_url,
-        "last_id": last_id
+        "last_id": last_id,
+        "topics": {}
     }
+
+    target_chat = CONFIG.get("active_chat_id") or update.effective_chat.id
+    topic_status_text = ""
+    if target_chat and await is_chat_forum(update.get_bot(), target_chat):
+        thread_id = await ensure_site_topic(update.get_bot(), target_chat, new_entry)
+        if thread_id:
+            topic_status_text = f"\n🗂️ تم إنشاء موضوع خاص للموقع باسم: {get_clean_topic_name(site_name)}"
+        else:
+            topic_status_text = "\n⚠️ تعذر إنشاء موضوع للموقع، تأكد أن البوت مشرف بصلاحية إدارة المواضيع."
+
     CONFIG.setdefault("sites", []).append(new_entry)
     await save_config_async()
 
     await status_msg.edit_text(
-        f"✅ تمت إضافة الموقع وحفظ آخر مقال كمرجع بنجاح!\nالاسم: {site_name}\nالرابط: {final_url}",
+        f"✅ تمت إضافة الموقع وحفظ آخر مقال كمرجع بنجاح!{topic_status_text}\n"
+        f"الاسم: {site_name}\nالرابط: {final_url}",
         reply_markup=get_main_keyboard()
     )
 
@@ -714,6 +919,11 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
     target_chat = target_chat_override or CONFIG.get("active_chat_id")
     if not target_chat:
         return 0
+
+    is_forum = await is_chat_forum(app.bot, target_chat)
+    if is_forum:
+        # التأكد من إنشاء مواضيع لجميع المواقع المحفوظة قبل النشر
+        await sync_all_site_topics(app.bot, target_chat)
 
     engine = CONFIG.get("trans_engine", "google")
     target_lang = CONFIG.get("target_lang", "ar")
@@ -752,18 +962,13 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
                     link = entry.get("link", "").strip()
                     pub_date = parse_date(entry)
 
-                    # استخراج المقال كاملاً بنفس طريقة الأداة
                     full_text = await asyncio.to_thread(extract_full_article, link, entry)
-
-                    # فحص ما إذا كان المنشور باللغة الإنجليزية للترجمة
                     need_trans = (target_lang != 'none') and is_english_content(raw_title, full_text)
 
                     if need_trans:
-                        # ترجمة العنوان لوحده
                         final_title, title_ok = await asyncio.to_thread(
                             translate_text_pipeline, raw_title, target_lang, engine
                         )
-                        # ترجمة نص المقال لوحده
                         final_content, body_ok = await asyncio.to_thread(
                             translate_text_pipeline, full_text, target_lang, engine
                         )
@@ -775,19 +980,15 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
 
                     trans_tag = " (مترجم)" if is_translated else ""
 
-                    # تنسيق المقال كما في الأداة تماماً
-                    # العنوان ثم نص المقال كاملاً ثم الوقت والتاريخ ثم الرابط
                     header_part = f"العنوان{trans_tag}: {final_title}\n\nنص المقال كاملاً كما كُتب في الموقع{trans_tag}:\n"
                     footer_part = f"\n\nالوقت والتاريخ: {pub_date}\nرابط صفحة الويب: {link}"
 
-                    # ضمان عدم تجاوز الحد الأقصى لحجم رسالة تيليجرام (4096 حرف)
                     available_content_len = 4000 - len(header_part) - len(footer_part)
                     if len(final_content) > available_content_len:
                         final_content = final_content[:max(100, available_content_len)] + "\n...(تم اختصار باقي المقال لطوله)"
 
                     msg_body = f"{header_part}{final_content}{footer_part}"
 
-                    # معالجة الفيديوهات إن وجدت
                     is_video_post = ("youtube.com" in link or "youtu.be" in link)
                     download_done = False
 
@@ -803,13 +1004,9 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
                                     caption = f"🎬 {final_title[:60]}"
                                     if total_parts > 1:
                                         caption += f" (الجزء {p_idx} من {total_parts})"
-                                    with open(part_path, "rb") as vf:
-                                        await app.bot.send_video(
-                                            chat_id=target_chat,
-                                            video=vf,
-                                            caption=caption,
-                                            supports_streaming=True
-                                        )
+                                    await send_site_video_part(
+                                        app.bot, target_chat, site, is_forum, part_path, caption
+                                    )
                                 download_done = True
                         except Exception as ve:
                             logger.error(f"خطأ تحميل الفيديو: {ve}")
@@ -817,10 +1014,7 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
                             shutil.rmtree(temp_dir, ignore_errors=True)
 
                     if not download_done:
-                        try:
-                            await app.bot.send_message(chat_id=target_chat, text=msg_body, disable_web_page_preview=False)
-                        except Exception as me:
-                            logger.error(f"فشل إرسال الرسالة: {me}")
+                        await send_site_message(app.bot, target_chat, site, is_forum, msg_body)
 
                     await asyncio.sleep(0.5)
 
@@ -839,7 +1033,18 @@ async def process_feeds_cycle(app, target_chat_override=None) -> int:
 
 # ==================== الفحص الدوري ====================
 async def background_loop(app):
-    await asyncio.sleep(5)
+    await asyncio.sleep(3)
+    # مزامنة مواضيع المواقع المحفوظة فور تشغيل البوت
+    target_chat = CONFIG.get("active_chat_id")
+    if target_chat:
+        try:
+            ok, created, msg = await sync_all_site_topics(app.bot, target_chat)
+            if ok and created > 0:
+                logger.info(f"🗂️ مزامنة البداية: {msg}")
+        except Exception as e:
+            logger.error(f"خطأ أثناء مزامنة المواضيع عند البداية: {e}")
+
+    await asyncio.sleep(2)
     while True:
         try:
             if time.time() - START_TIME >= MAX_SERVER_LIFETIME:
@@ -864,7 +1069,7 @@ async def background_loop(app):
 
 async def on_post_init(app):
     asyncio.create_task(background_loop(app))
-    logger.info("✅ تم بدء الجدولة الدقيقة والترجمة بنجاح.")
+    logger.info("✅ تم بدء الجدولة الدقيقة والترجمة ونظام المواضيع بنجاح.")
 
 # ==================== التشغيل ====================
 def main():
@@ -877,11 +1082,12 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("topics", topics_command))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
 
-    print("🚀 تم تشغيل البوت بنجاح مع محركات الترجمة والتنسيق المطور.")
+    print("🚀 تم تشغيل البوت بنجاح مع محركات الترجمة ودعم المواضيع في المجموعات.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
