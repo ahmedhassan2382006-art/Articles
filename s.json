@@ -4,7 +4,7 @@
       "title": "Sky Stars",
       "linked_group_id": -1002383098026,
       "linked_group_title": "⁨Sky Stars⁩ محادثة",
-      "last_known_msg_id": 0,
+      "last_known_msg_id": 28,
       "posts": {
         "28": {
           "likes": 0,
@@ -21,9 +21,9 @@
     "-1002383098026:34": "-1002527184826:28"
   },
   "owner_id": 6701042883,
-  "is_running": false,
-  "default_channel_id": null,
-  "default_group_id": null,
+  "is_running": true,
+  "default_channel_id": -1002527184826,
+  "default_group_id": -1002383098026,
   "known_groups": {
     "-1002383098026": {
       "title": "⁨Sky Stars⁩ محادثة",
