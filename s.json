@@ -13,10 +13,21 @@
           "group_id": -1002383098026,
           "group_msg_id": 34
         }
-      }
+      },
+      "can_edit_messages": true
     }
   },
   "group_post_map": {
     "-1002383098026:34": "-1002527184826:28"
+  },
+  "owner_id": null,
+  "is_running": false,
+  "default_channel_id": null,
+  "default_group_id": null,
+  "known_groups": {
+    "-1002383098026": {
+      "title": "⁨Sky Stars⁩ محادثة",
+      "linked_channel_id": -1002527184826
+    }
   }
 }
