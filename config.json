@@ -50,7 +50,7 @@
       "id": 1793810546,
       "name": "Softpedia Windows / All",
       "url": "https://www.softpedia.com/backend.xml",
-      "last_id": "https://www.softpedia.com/get/Internet/Servers/Other-Servers/ChromeDriver.shtml",
+      "last_id": "https://www.softpedia.com/get/Internet/Servers/Other-Servers/Apache-Tomcat.shtml",
       "topics": {
         "-1003924183926": 4062
       }
@@ -59,7 +59,7 @@
       "id": 1793810597,
       "name": "MajorGeeks.Com",
       "url": "https://www.majorgeeks.com/files/rss",
-      "last_id": "53aac2193a1769856ccdc6e6f27f50056d15a517",
+      "last_id": "62f54034c31d66094d883824172890650dd4a701",
       "topics": {
         "-1003924183926": 4063
       }
@@ -86,7 +86,7 @@
       "id": 1793811206,
       "name": "TechCrunch",
       "url": "https://techcrunch.com/feed/",
-      "last_id": "https://techcrunch.com/?p=3188979",
+      "last_id": "https://techcrunch.com/?p=3188333",
       "topics": {
         "-1003924183926": 4066
       }
