@@ -5,8 +5,18 @@
       "linked_group_id": -1002383098026,
       "linked_group_title": "⁨Sky Stars⁩ محادثة",
       "last_known_msg_id": 0,
-      "posts": {}
+      "posts": {
+        "28": {
+          "likes": 0,
+          "dislikes": 0,
+          "voters": {},
+          "group_id": -1002383098026,
+          "group_msg_id": 34
+        }
+      }
     }
   },
-  "group_post_map": {}
+  "group_post_map": {
+    "-1002383098026:34": "-1002527184826:28"
+  }
 }
