@@ -54,16 +54,24 @@ for sep in ["\\", "/", "\n", "|"]:
         GITHUB_TOKEN = parts[1].strip()
         break
 
+if not GITHUB_TOKEN and SECRET_RAW.startswith(("ghp_", "github_pat_", "gho_", "ghu_", "ghs_")):
+    GITHUB_TOKEN = SECRET_RAW
+
 if not GITHUB_TOKEN:
     GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip() or None
 
+# مستودع حفظ الحالة s.json
 REPO_OWNER = "ahmedhassan2382006-art"
 REPO_NAME = "Articles"
-TOKEN_FILE_PATH = "t.txt"
 STATE_FILE_PATH = "s.json"
 LOCAL_STATE_PATH = "s.json"
 
-GITHUB_TOKEN_FILE_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{TOKEN_FILE_PATH}"
+# المستودع الخاص بالمفاتيح (قراءة t.txt)
+TOKEN_REPO_OWNER = "ahmedhassan2382006-art"
+TOKEN_REPO_NAME = "kys"
+TOKEN_FILE_PATH = "t.txt"
+
+GITHUB_TOKEN_FILE_URL = f"https://api.github.com/repos/{TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME}/contents/{TOKEN_FILE_PATH}"
 GITHUB_STATE_FILE_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{STATE_FILE_PATH}"
 
 START_TIME = time.time()
@@ -94,7 +102,7 @@ def _github_headers() -> Dict[str, str]:
 
 
 def load_bot2_token() -> Optional[str]:
-    """جلب توكن البوت الثاني من ملف t.txt على GitHub أو محلياً"""
+    """جلب توكن البوت الثاني من ملف t.txt على المستودع الخاص kys أو محلياً"""
     if GITHUB_TOKEN:
         try:
             res = requests.get(GITHUB_TOKEN_FILE_URL, headers=_github_headers(), timeout=12)
@@ -104,11 +112,17 @@ def load_bot2_token() -> Optional[str]:
                 for line in content.splitlines():
                     tok = line.strip()
                     if tok and ":" in tok and not tok.startswith("#"):
+                        logger.info(f"🔑 تم قراءة {TOKEN_FILE_PATH} من المستودع الخاص {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} بنجاح.")
                         return tok
             else:
-                logger.warning(f"⚠️ تعذر قراءة t.txt من GitHub (كود: {res.status_code})")
+                logger.warning(
+                    f"⚠️ تعذر قراءة {TOKEN_FILE_PATH} من {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} "
+                    f"(كود: {res.status_code}) — تأكد أن التوكن في Secret يملك صلاحية الوصول للمستودع الخاص kys."
+                )
         except Exception as e:
-            logger.error(f"خطأ أثناء جلب t.txt من GitHub: {e}")
+            logger.error(f"خطأ أثناء جلب {TOKEN_FILE_PATH} من {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME}: {e}")
+    else:
+        logger.warning("⚠️ لم يتم العثور على GITHUB_TOKEN لقراءة المستودع الخاص kys.")
 
     if os.path.exists(TOKEN_FILE_PATH):
         try:
@@ -118,7 +132,7 @@ def load_bot2_token() -> Optional[str]:
                     if tok and ":" in tok and not tok.startswith("#"):
                         return tok
         except Exception as e:
-            logger.error(f"خطأ قراءة {TOKEN_FILE_PATH}: {e}")
+            logger.error(f"خطأ قراءة {TOKEN_FILE_PATH} محلياً: {e}")
 
     return None
 
@@ -475,7 +489,6 @@ async def send_native_poll_safe(
         if k in sig_params:
             kwargs[k] = v
         elif k == "allows_revoting" or v:
-            # إرسال allows_revoting دائماً، وإرسال البقية عند التفعيل لضمان التوافق
             api_kwargs[k] = v
 
     if api_kwargs and "api_kwargs" in sig_params:
@@ -488,7 +501,6 @@ async def send_native_poll_safe(
             await asyncio.sleep(int(getattr(ra, "retry_after", 2)) + 1)
         except BadRequest as e:
             err = str(e).lower()
-            # في حال عدم دعم الخادم/النسخة لأحد المعاملات الحديثة أو الرد
             if "reply" in err and ("reply_parameters" in kwargs or "reply_to_message_id" in kwargs):
                 kwargs.pop("reply_parameters", None)
                 kwargs.pop("reply_to_message_id", None)
@@ -797,13 +809,24 @@ def _cache_channel_post_candidate(ch_data: Dict[str, Any], msg):
         return
     is_media = _is_media_message(msg)
     entities = msg.entities if msg.text is not None else msg.caption_entities
+    _cache_channel_post_candidate_raw(ch_data, msg.message_id, raw_text, entities, is_media)
+
+
+def _cache_channel_post_candidate_raw(
+    ch_data: Dict[str, Any],
+    msg_id: int,
+    raw_text: str,
+    entities: Optional[Tuple[MessageEntity, ...] | List[MessageEntity]],
+    is_media: bool,
+):
+    if not raw_text:
+        return
     candidates = ch_data.setdefault("candidates", {})
-    candidates[str(msg.message_id)] = {
+    candidates[str(msg_id)] = {
         "text": raw_text,
         "entities": _serialize_entities(entities),
         "is_media": is_media,
     }
-    # الإبقاء على آخر 40 منشوراً فقط لتجنب تضخم s.json
     if len(candidates) > 40:
         sorted_keys = sorted(candidates.keys(), key=lambda x: int(x))
         for old_k in sorted_keys[:-40]:
@@ -876,7 +899,6 @@ async def process_trigger_post(
                 deleted_original = False
 
         if not deleted_original:
-            # تيليجرام لا يقبل نصاً فارغاً؛ نعدله بعنوان الاستفتاء ونرسل الاستفتاء تحته
             await safe_edit_post_without_trigger(
                 bot=bot,
                 chat_id=channel_id,
@@ -1104,7 +1126,7 @@ def build_control_panel_text() -> str:
         f"• <b>آخر رقم منشور معروف:</b> <code>{last_mid_line}</code>\n"
         f"• <b>القنوات المكتشفة:</b> {len(channels)} | <b>المجموعات:</b> {len(groups)}\n\n"
         f"• <b>الكلمة المفتاحية في بداية المنشور:</b> <code>{trig}</code>\n"
-        f"• <b>سؤال الاستفتاء:</b> {_html_escape(q_txt)}\n"
+        f"• <b>سؤال الاستفتاء:</b> {q_txt}\n"
         f"• <b>نمط التحديد:</b> {multi_label}\n"
         f"• <b>التصويت المتكرر:</b> {revote_label}\n"
         f"• <b>عناصر التصويت ({len(options)}):</b>\n{opts_preview}\n\n"
@@ -1424,7 +1446,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         await msg.reply_text("⛔ هذا البوت مخصص لصاحبه فقط.")
         return
 
-    # إذا كان المالك في خطوة إدخال من الإعدادات
     pending = context.user_data.get("pending_action")
     if isinstance(pending, dict):
         handled = await _handle_pending_input(msg, context, pending)
@@ -1441,7 +1462,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 ch_data["last_known_msg_id"] = fwd_msg_id
             info += f"\n🔢 تم تسجيل رقم المنشور: {fwd_msg_id}"
 
-            # إذا كان المنشور المحوّل يبدأ بالكلمة المفتاحية ولم يُعالج بعد
             raw_fwd = msg.text if msg.text is not None else (msg.caption or "")
             if raw_fwd:
                 fwd_ents = msg.entities if msg.text is not None else msg.caption_entities
@@ -1524,27 +1544,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     await send_or_edit_panel(msg, edit=False)
-
-
-def _cache_channel_post_candidate_raw(
-    ch_data: Dict[str, Any],
-    msg_id: int,
-    raw_text: str,
-    entities: Optional[Tuple[MessageEntity, ...] | List[MessageEntity]],
-    is_media: bool,
-):
-    if not raw_text:
-        return
-    candidates = ch_data.setdefault("candidates", {})
-    candidates[str(msg_id)] = {
-        "text": raw_text,
-        "entities": _serialize_entities(entities),
-        "is_media": is_media,
-    }
-    if len(candidates) > 40:
-        sorted_keys = sorted(candidates.keys(), key=lambda x: int(x))
-        for old_k in sorted_keys[:-40]:
-            candidates.pop(old_k, None)
 
 
 async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1855,7 +1854,6 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if is_service_message(msg):
         return
 
-    # تجاهل رسائل الاستفتاء نفسها
     if getattr(msg, "poll", None) is not None:
         return
 
@@ -1870,7 +1868,6 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     _cache_channel_post_candidate(ch_data, msg)
 
-    # لا يعالج إلا إذا كان البوت في وضع التشغيل وعلى القناة الافتراضية
     if not STATE.get("is_running") or STATE.get("default_channel_id") != channel_id:
         await save_local_now()
         return
@@ -1894,7 +1891,6 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         await save_local_now()
         return
 
-    # في الألبوم نضع الاستفتاء مرة واحدة فقط لأول عنصر يحمل الكلمة المفتاحية
     mg_id = getattr(msg, "media_group_id", None)
     if mg_id:
         now = time.time()
@@ -1947,20 +1943,17 @@ async def background_loop(app):
         try:
             now = time.time()
 
-            # قبل الإغلاق الآمن للجلسة: رفع محتوى s.json المحلي إلى GitHub
             if now - START_TIME >= MAX_SERVER_LIFETIME:
                 logger.info("⏳ انتهت مدة جلسة البوت الثاني، جاري حفظ s.json على GitHub والإغلاق الآمن...")
                 await sync_local_to_github_now()
                 os._exit(0)
 
-            # كل 9 دقائق: يأخذ محتوى ملف s.json من الجهاز ويحفظه على GitHub
             if now - LAST_GITHUB_SYNC_TS >= GITHUB_SYNC_INTERVAL:
                 if STATE_DIRTY:
                     await sync_local_to_github_now()
                 else:
                     LAST_GITHUB_SYNC_TS = now
 
-            # فحص دوري كل 5 دقائق للقنوات والمجموعات
             if now - last_verify >= 300:
                 await verify_all_registered_chats(app.bot)
                 if STATE.get("is_running") and STATE.get("default_channel_id"):
@@ -1977,7 +1970,7 @@ async def background_loop(app):
 
 async def on_post_init(app):
     asyncio.create_task(background_loop(app))
-    logger.info("✅ تم تشغيل البوت الثاني بنجاح (استفتاء تيليجرام الأصلي + حفظ محلي + مزامنة GitHub كل 9 دقائق).")
+    logger.info("✅ تم تشغيل البوت الثاني بنجاح (قراءة t.txt من kys + استفتاء تيليجرام الأصلي + مزامنة s.json على Articles).")
 
 
 def main():
