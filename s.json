@@ -36,7 +36,7 @@
     }
   },
   "settings": {
-    "trigger_word": "@like",
+    "trigger_word": "$bot",
     "case_sensitive_trigger": false,
     "poll_question": "📊 قيّم هذا المنشور:",
     "poll_options": [
