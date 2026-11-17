@@ -7,7 +7,7 @@
       "can_post_messages": true,
       "can_edit_messages": true,
       "can_delete_messages": true,
-      "last_known_msg_id": 31,
+      "last_known_msg_id": 34,
       "posts": {},
       "candidates": {
         "31": {
@@ -16,12 +16,17 @@
           "is_media": false
         }
       },
-      "checked_ids": []
+      "checked_ids": [
+        32,
+        33,
+        34,
+        31
+      ]
     }
   },
   "group_post_map": {},
   "owner_id": 6701042883,
-  "is_running": false,
+  "is_running": true,
   "default_channel_id": -1002527184826,
   "default_group_id": -1002383098026,
   "known_groups": {
