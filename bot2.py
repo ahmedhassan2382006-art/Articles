@@ -58,7 +58,11 @@ if not GITHUB_TOKEN and SECRET_RAW.startswith(("ghp_", "github_pat_", "gho_", "g
     GITHUB_TOKEN = SECRET_RAW
 
 if not GITHUB_TOKEN:
-    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip() or None
+    GITHUB_TOKEN = (
+        os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or ""
+    ).strip() or None
 
 # مستودع حفظ الحالة s.json
 REPO_OWNER = "ahmedhassan2382006-art"
@@ -101,23 +105,52 @@ def _github_headers() -> Dict[str, str]:
     return headers
 
 
+def _extract_telegram_bot_token(raw_text: str) -> Optional[str]:
+    """استخراج توكن بوت تيليجرام صالح من النص"""
+    if not raw_text:
+        return None
+    for line in raw_text.splitlines():
+        cleaned = line.strip().strip('"').strip("'")
+        if not cleaned or cleaned.startswith("#"):
+            continue
+        m = re.search(r"\b(\d{6,}:[A-Za-z0-9_-]{20,})\b", cleaned)
+        if m:
+            return m.group(1)
+        if ":" in cleaned and not cleaned.startswith(("http://", "https://", "ghp_", "github_pat_")):
+            return cleaned
+    return None
+
+
 def load_bot2_token() -> Optional[str]:
-    """جلب توكن البوت الثاني من ملف t.txt على المستودع الخاص kys أو محلياً"""
+    """
+    جلب توكن البوت بالترتيب التالي:
+    1) من السكرت LIKE (أولوية أولى).
+    2) من ملف t.txt على المستودع الخاص kys باستخدام نفس GITHUB_TOKEN الخاص بالحفظ.
+    3) من ملف t.txt المحلي إذا وُجد.
+    """
+    like_secret = os.environ.get("LIKE", "").strip()
+    if like_secret:
+        tok = _extract_telegram_bot_token(like_secret)
+        if tok:
+            logger.info("🔑 تم قراءة توكن البوت من السكرت LIKE بنجاح.")
+            return tok
+        logger.warning("⚠️ المتغير LIKE موجود لكنه لا يحتوي على صيغة توكن تيليجرام صالحة، جاري المحاولة من المستودع الخاص kys...")
+
     if GITHUB_TOKEN:
         try:
             res = requests.get(GITHUB_TOKEN_FILE_URL, headers=_github_headers(), timeout=12)
             if res.status_code == 200:
                 raw_b64 = res.json().get("content", "")
                 content = base64.b64decode(raw_b64).decode("utf-8-sig")
-                for line in content.splitlines():
-                    tok = line.strip()
-                    if tok and ":" in tok and not tok.startswith("#"):
-                        logger.info(f"🔑 تم قراءة {TOKEN_FILE_PATH} من المستودع الخاص {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} بنجاح.")
-                        return tok
+                tok = _extract_telegram_bot_token(content)
+                if tok:
+                    logger.info(f"🔑 تم قراءة {TOKEN_FILE_PATH} من المستودع الخاص {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} بنجاح.")
+                    return tok
+                logger.warning(f"⚠️ الملف {TOKEN_FILE_PATH} في {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} لا يحتوي على توكن صالح.")
             else:
                 logger.warning(
                     f"⚠️ تعذر قراءة {TOKEN_FILE_PATH} من {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} "
-                    f"(كود: {res.status_code}) — تأكد أن التوكن في Secret يملك صلاحية الوصول للمستودع الخاص kys."
+                    f"(كود: {res.status_code} - {res.text[:140]})"
                 )
         except Exception as e:
             logger.error(f"خطأ أثناء جلب {TOKEN_FILE_PATH} من {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME}: {e}")
@@ -127,10 +160,10 @@ def load_bot2_token() -> Optional[str]:
     if os.path.exists(TOKEN_FILE_PATH):
         try:
             with open(TOKEN_FILE_PATH, "r", encoding="utf-8-sig") as f:
-                for line in f:
-                    tok = line.strip()
-                    if tok and ":" in tok and not tok.startswith("#"):
-                        return tok
+                tok = _extract_telegram_bot_token(f.read())
+                if tok:
+                    logger.info(f"🔑 تم قراءة توكن البوت من الملف المحلي {TOKEN_FILE_PATH}.")
+                    return tok
         except Exception as e:
             logger.error(f"خطأ قراءة {TOKEN_FILE_PATH} محلياً: {e}")
 
@@ -139,7 +172,7 @@ def load_bot2_token() -> Optional[str]:
 
 BOT2_TOKEN = load_bot2_token()
 if not BOT2_TOKEN:
-    logger.error("❌ لم يتم العثور على توكن البوت الثاني في t.txt!")
+    logger.error("❌ لم يتم العثور على توكن البوت في السكرت LIKE أو في المستودع الخاص kys/t.txt!")
     sys.exit(1)
 
 
@@ -888,7 +921,6 @@ async def process_trigger_post(
     reply_target_id: Optional[int] = msg_id
     deleted_original = False
 
-    # حالة منشور نصي يحتوي فقط على الكلمة المفتاحية بدون نص ولا وسائط
     if not is_media and not cleaned_stripped:
         if delete_trigger_only:
             try:
@@ -908,7 +940,6 @@ async def process_trigger_post(
                 is_media=False,
             )
 
-    # حالة منشور نصي قصير مع تفعيل خيار استبداله بسؤال الاستفتاء
     elif not is_media and can_use_post_as_q:
         try:
             await bot.delete_message(chat_id=channel_id, message_id=msg_id)
@@ -924,7 +955,6 @@ async def process_trigger_post(
                 is_media=False,
             )
 
-    # الحالة القياسية: منشور نصي أو وسائط مع حذف الكلمة المفتاحية @like وإبقاء المحتوى كاملاً
     else:
         edit_status = await safe_edit_post_without_trigger(
             bot=bot,
@@ -1119,7 +1149,9 @@ def build_control_panel_text() -> str:
     )
 
     return (
-        "🎛️ <b>لوحة تحكم بوت الاستفتاء والتصويت</b>\n\n"
+        "👋 <b>أهلاً بك في بوت الاستفتاء والتصويت</b>\n"
+        "👨‍💻 <b>المطور:</b> أحمد حسن عبد النبي\n\n"
+        "🎛️ <b>لوحة تحكم البوت</b>\n\n"
         f"• <b>الحالة:</b> {status_line}\n"
         f"• <b>القناة الافتراضية:</b> {ch_line}\n"
         f"• <b>المجموعة الافتراضية:</b> {grp_line}\n"
@@ -1323,7 +1355,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_local_now()
         await sync_local_to_github_now()
     elif not is_owner(user_id):
-        await msg.reply_text("⛔ هذا البوت مخصص لصاحبه فقط.")
+        await msg.reply_text("⛔ هذا البوت مخصص لصاحبه فقط.\n👨‍💻 المطور: أحمد حسن عبد النبي")
         return
 
     await verify_all_registered_chats(context.bot)
@@ -1443,7 +1475,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         STATE["owner_id"] = user_id
         await save_local_now()
     elif not is_owner(user_id):
-        await msg.reply_text("⛔ هذا البوت مخصص لصاحبه فقط.")
+        await msg.reply_text("⛔ هذا البوت مخصص لصاحبه فقط.\n👨‍💻 المطور: أحمد حسن عبد النبي")
         return
 
     pending = context.user_data.get("pending_action")
@@ -1452,7 +1484,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         if handled:
             return
 
-    # 1) إذا أعاد المالك توجيه رسالة من قناة أو مجموعة للتعرف عليها
     fwd_chat_id, fwd_msg_id, _ = extract_origin_from_forwarded_post(msg)
     if fwd_chat_id:
         ok, info = await sync_single_chat(context.bot, fwd_chat_id)
@@ -1521,7 +1552,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         await send_or_edit_panel(msg, edit=False)
         return
 
-    # 2) إذا أرسل المالك رابط منشور أو @username أو معرّف قناة/مجموعة
     chat_ref, link_msg_id = parse_chat_or_link(text)
     if chat_ref is not None:
         try:
@@ -1567,7 +1597,6 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await send_or_edit_panel(query.message, edit=True)
         return
 
-    # ===== إدارة عناصر التصويت =====
     if action == "opts":
         await send_or_edit_view(query.message, build_options_menu_text(), build_options_menu_markup(), edit=True)
         return
@@ -1630,7 +1659,6 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await send_or_edit_view(query.message, build_options_menu_text(), build_options_menu_markup(), edit=True)
         return
 
-    # ===== إعدادات البوت والاستفتاء =====
     if action == "cfg":
         await send_or_edit_view(query.message, build_settings_menu_text(), build_settings_menu_markup(), edit=True)
         return
@@ -1686,7 +1714,6 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await send_or_edit_view(query.message, build_settings_menu_text(), build_settings_menu_markup(), edit=True)
         return
 
-    # ===== القنوات والمجموعات والتشغيل =====
     if action == "chs":
         if not STATE.get("channels"):
             await query.message.edit_text(
@@ -1970,7 +1997,7 @@ async def background_loop(app):
 
 async def on_post_init(app):
     asyncio.create_task(background_loop(app))
-    logger.info("✅ تم تشغيل البوت الثاني بنجاح (قراءة t.txt من kys + استفتاء تيليجرام الأصلي + مزامنة s.json على Articles).")
+    logger.info("✅ تم تشغيل البوت الثاني بنجاح (أولوية LIKE ثم kys/t.txt + استفتاء تيليجرام الأصلي + مزامنة s.json على Articles).")
 
 
 def main():
