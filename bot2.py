@@ -26,13 +26,14 @@ try:
 except ImportError:
     ReplyParameters = None
 
-from telegram.error import BadRequest, RetryAfter, Forbidden, TelegramError
+from telegram.error import BadRequest, RetryAfter, Forbidden, TelegramError, Conflict
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
     ChatMemberHandler,
+    TypeHandler,
     ContextTypes,
     filters,
 )
@@ -84,9 +85,8 @@ GITHUB_TOKEN_FILE_URL = f"https://api.github.com/repos/{TOKEN_REPO_OWNER}/{TOKEN
 GITHUB_STATE_FILE_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{STATE_FILE_PATH}"
 
 START_TIME = time.time()
-# 4 ساعات و53 دقيقة: يغلق قبل وصول موعد تشغيل البوت القديم عند الساعة 5:00
 MAX_SERVER_LIFETIME = (5 * 3600) - 420
-GITHUB_SYNC_INTERVAL = 9 * 60  # حفظ محتوى الملف المحلي على GitHub كل 9 دقائق
+GITHUB_SYNC_INTERVAL = 9 * 60
 
 STATE_LOCK = asyncio.Lock()
 GITHUB_STATE_SHA: Optional[str] = None
@@ -94,6 +94,12 @@ STATE_DIRTY = False
 LAST_GITHUB_SYNC_TS = 0.0
 
 SEEN_MEDIA_GROUPS: Dict[str, float] = {}
+
+# متغيرات التشخيص الحي
+LAST_SEEN_CHANNEL_POST: Optional[Dict[str, Any]] = None
+LAST_PROCESS_ERROR: str = ""
+CONFLICT_COUNT: int = 0
+CONFLICT_NOTIFIED: bool = False
 
 DEFAULT_POLL_OPTIONS = ["👍 إعجاب", "👎 عدم إعجاب"]
 DEFAULT_POLL_QUESTION = "📊 قيّم هذا المنشور:"
@@ -111,7 +117,6 @@ def _github_headers() -> Dict[str, str]:
 
 
 def _extract_telegram_bot_token(raw_text: str) -> Optional[str]:
-    """استخراج توكن بوت تيليجرام صالح من النص"""
     if not raw_text:
         return None
     for line in raw_text.splitlines():
@@ -127,19 +132,13 @@ def _extract_telegram_bot_token(raw_text: str) -> Optional[str]:
 
 
 def load_bot2_token() -> Optional[str]:
-    """
-    جلب توكن البوت بالترتيب التالي:
-    1) من السكرت LIKE (أولوية أولى).
-    2) من ملف t.txt على المستودع الخاص kys باستخدام نفس GITHUB_TOKEN الخاص بالحفظ.
-    3) من ملف t.txt المحلي إذا وُجد.
-    """
     like_secret = os.environ.get("LIKE", "").strip()
     if like_secret:
         tok = _extract_telegram_bot_token(like_secret)
         if tok:
             logger.info("🔑 تم قراءة توكن البوت من السكرت LIKE بنجاح.")
             return tok
-        logger.warning("⚠️ المتغير LIKE موجود لكنه لا يحتوي على صيغة توكن تيليجرام صالحة، جاري المحاولة من المستودع الخاص kys...")
+        logger.warning("⚠️ المتغير LIKE لا يحتوي على توكن صالح، جاري المحاولة من المستودع الخاص kys...")
 
     if GITHUB_TOKEN:
         try:
@@ -149,25 +148,18 @@ def load_bot2_token() -> Optional[str]:
                 content = base64.b64decode(raw_b64).decode("utf-8-sig")
                 tok = _extract_telegram_bot_token(content)
                 if tok:
-                    logger.info(f"🔑 تم قراءة {TOKEN_FILE_PATH} من المستودع الخاص {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} بنجاح.")
+                    logger.info(f"🔑 تم قراءة {TOKEN_FILE_PATH} من {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} بنجاح.")
                     return tok
-                logger.warning(f"⚠️ الملف {TOKEN_FILE_PATH} في {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} لا يحتوي على توكن صالح.")
             else:
-                logger.warning(
-                    f"⚠️ تعذر قراءة {TOKEN_FILE_PATH} من {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME} "
-                    f"(كود: {res.status_code} - {res.text[:140]})"
-                )
+                logger.warning(f"⚠️ تعذر قراءة {TOKEN_FILE_PATH} من kys (كود: {res.status_code})")
         except Exception as e:
-            logger.error(f"خطأ أثناء جلب {TOKEN_FILE_PATH} من {TOKEN_REPO_OWNER}/{TOKEN_REPO_NAME}: {e}")
-    else:
-        logger.warning("⚠️ لم يتم العثور على GITHUB_TOKEN لقراءة المستودع الخاص kys.")
+            logger.error(f"خطأ جلب {TOKEN_FILE_PATH} من kys: {e}")
 
     if os.path.exists(TOKEN_FILE_PATH):
         try:
             with open(TOKEN_FILE_PATH, "r", encoding="utf-8-sig") as f:
                 tok = _extract_telegram_bot_token(f.read())
                 if tok:
-                    logger.info(f"🔑 تم قراءة توكن البوت من الملف المحلي {TOKEN_FILE_PATH}.")
                     return tok
         except Exception as e:
             logger.error(f"خطأ قراءة {TOKEN_FILE_PATH} محلياً: {e}")
@@ -252,7 +244,6 @@ def get_settings() -> Dict[str, Any]:
 
 
 def write_local_state_sync(state_obj: Dict[str, Any]) -> bool:
-    """كتابة آمنة فورية إلى ملف s.json على الجهاز"""
     try:
         tmp_path = f"{LOCAL_STATE_PATH}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -265,11 +256,8 @@ def write_local_state_sync(state_obj: Dict[str, Any]) -> bool:
 
 
 def _sync_push_local_file_to_github() -> bool:
-    """قراءة محتوى s.json من الجهاز ورفعه إلى GitHub مع [skip ci] لمنع إعادة تشغيل أي بوت"""
     global GITHUB_STATE_SHA
-    if not GITHUB_TOKEN:
-        return False
-    if not os.path.exists(LOCAL_STATE_PATH):
+    if not GITHUB_TOKEN or not os.path.exists(LOCAL_STATE_PATH):
         return False
 
     try:
@@ -313,7 +301,6 @@ def _sync_push_local_file_to_github() -> bool:
 
 
 def _init_load_state() -> Dict[str, Any]:
-    """جلب s.json من GitHub عند التشغيل وحفظه محلياً على الجهاز"""
     global GITHUB_STATE_SHA
     default_cfg = _default_state()
 
@@ -352,7 +339,6 @@ STATE: Dict[str, Any] = _init_load_state()
 
 
 async def save_local_now():
-    """حفظ التعديلات في ملف s.json المحلي فوراً"""
     global STATE_DIRTY
     async with STATE_LOCK:
         snapshot = json.loads(json.dumps(STATE, ensure_ascii=False))
@@ -362,7 +348,6 @@ async def save_local_now():
 
 
 async def sync_local_to_github_now() -> bool:
-    """مزامنة ملف s.json المحلي إلى GitHub"""
     global STATE_DIRTY, LAST_GITHUB_SYNC_TS
     async with STATE_LOCK:
         snapshot = json.loads(json.dumps(STATE, ensure_ascii=False))
@@ -387,15 +372,14 @@ def extract_trigger_and_clean_text(
 ) -> Tuple[bool, str, List[MessageEntity]]:
     """
     يتحقق من وجود الكلمة المفتاحية في بداية النص:
-    - يقبل أي حرف/علامة/إيموجي/مسافة/نص عربي بعدها مباشرة (مثل: @likeالسلام، @like. مرحبا).
+    - يقبل أي حرف عربي/علامة/رقم/إيموجي/مسافة بعدها مباشرة (مثل: @likeالسلام، @like. مرحبا، $botالسلام).
     - الحالة الوحيدة المستثناة: إذا تلاها حرف إنجليزي مباشرة بدون فاصل (مثل: @likehello).
-    - يحذف الكلمة المفتاحية والمسافات التي تليها مع إعادة ضبط مواضع التنسيقات بدقة.
     """
     if not raw_text or not trigger_word:
         return False, raw_text or "", list(entities or [])
 
     flags = 0 if case_sensitive else re.IGNORECASE
-    leading_ws = r"[\s\u200b-\u200f\u202a-\u202e\ufeff]*"
+    leading_ws = r"[\s\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]*"
     pattern = rf"^{leading_ws}{re.escape(trigger_word)}(?![A-Za-z]){leading_ws}"
     m = re.match(pattern, raw_text, flags=flags)
     if not m:
@@ -474,7 +458,6 @@ def _deserialize_entities(raw_list: Optional[List[Dict[str, Any]]]) -> List[Mess
 
 
 def _extract_poll_compatible_media(msg) -> Optional[Tuple[str, str]]:
-    """استخراج نوع ومعرّف الوسائط المدعومة داخل رسالة الاستفتاء (InputPollMedia)"""
     if getattr(msg, "photo", None):
         return "photo", msg.photo[-1].file_id
     if getattr(msg, "video", None):
@@ -489,16 +472,7 @@ def _extract_poll_compatible_media(msg) -> Optional[Tuple[str, str]]:
 
 
 def _is_media_message(msg) -> bool:
-    media_attrs = (
-        "photo",
-        "video",
-        "animation",
-        "document",
-        "audio",
-        "voice",
-        "video_note",
-    )
-    for attr in media_attrs:
+    for attr in ("photo", "video", "animation", "document", "audio", "voice", "video_note"):
         if getattr(msg, attr, None):
             return True
     return False
@@ -515,14 +489,11 @@ async def send_native_poll_safe(
     media_info: Optional[Tuple[str, str]] = None,
     strict_combined: bool = False,
 ) -> Optional[Any]:
-    """
-    يرسل استفتاء تيليجرام الأصلي (مع إمكانية تضمين نص المنشور في description والوسائط في media
-    لتكون في رسالة واحدة فقط عند الإمكان).
-    """
+    global LAST_PROCESS_ERROR
     settings = get_settings()
     clean_options = [str(o).strip()[:100] for o in options if str(o).strip()][:12]
     if not clean_options:
-        logger.warning("⚠️ لا توجد عناصر تصويت محددة في الإعدادات.")
+        LAST_PROCESS_ERROR = "لا توجد عناصر تصويت مضافة في الإعدادات."
         return None
 
     clean_question = (question or DEFAULT_POLL_QUESTION).strip()[:300]
@@ -550,7 +521,6 @@ async def send_native_poll_safe(
 
     api_kwargs: Dict[str, Any] = {}
 
-    # تضمين وصف المنشور (0-1024 حرف) داخل الاستفتاء نفسه
     if description:
         if "description" in sig_params:
             kwargs["description"] = description
@@ -561,7 +531,6 @@ async def send_native_poll_safe(
             if description_entities:
                 api_kwargs["description_entities"] = [e.to_dict() for e in description_entities]
 
-    # تضمين الوسائط داخل الاستفتاء نفسه (Bot API 10.0+)
     if media_info:
         mtype, file_id = media_info
         media_cls_map = {
@@ -593,17 +562,19 @@ async def send_native_poll_safe(
 
     for attempt in range(3):
         try:
-            return await bot.send_poll(**kwargs)
+            res = await bot.send_poll(**kwargs)
+            LAST_PROCESS_ERROR = ""
+            return res
         except RetryAfter as ra:
             await asyncio.sleep(int(getattr(ra, "retry_after", 2)) + 1)
         except BadRequest as e:
             err = str(e).lower()
+            LAST_PROCESS_ERROR = f"send_poll BadRequest: {e}"
             if "reply" in err and ("reply_parameters" in kwargs or "reply_to_message_id" in kwargs):
                 kwargs.pop("reply_parameters", None)
                 kwargs.pop("reply_to_message_id", None)
                 continue
-            # في الوضع المدمج الصارم: إذا رُفض الوصف أو الوسائط لا نحذف المنشور بل نتراجع للوضع الاحتياطي
-            if strict_combined and any(w in err for w in ("description", "media", "entity", "entities")):
+            if strict_combined:
                 logger.warning(f"⚠️ تعذر إرسال الاستفتاء المدمج في ({chat_id}): {e}")
                 return None
             if attempt == 0:
@@ -618,10 +589,12 @@ async def send_native_poll_safe(
             logger.warning(f"⚠️ تعذر إرسال الاستفتاء في ({chat_id}): {e}")
             return None
         except Forbidden as e:
+            LAST_PROCESS_ERROR = f"send_poll Forbidden: {e}"
             logger.warning(f"⛔ لا توجد صلاحية نشر استفتاء في ({chat_id}): {e}")
             return None
-        except TelegramError as e:
-            logger.warning(f"⚠️ خطأ تيليجرام أثناء إرسال الاستفتاء ({chat_id}): {e}")
+        except Exception as e:
+            LAST_PROCESS_ERROR = f"send_poll Error: {e}"
+            logger.warning(f"⚠️ خطأ أثناء إرسال الاستفتاء ({chat_id}): {e}")
             return None
     return None
 
@@ -634,10 +607,7 @@ async def safe_edit_post_without_trigger(
     entities: List[MessageEntity],
     is_media: bool,
 ) -> str:
-    """
-    يعدل نص المنشور أو وصف الوسائط لحذف الكلمة المفتاحية فقط.
-    يرجع: 'ok' | 'not_modified' | 'not_found' | 'not_editable' | 'forbidden' | 'error'
-    """
+    global LAST_PROCESS_ERROR
     for use_entities in (True, False):
         for _ in range(2):
             try:
@@ -671,6 +641,7 @@ async def safe_edit_post_without_trigger(
                     return "not_modified"
                 if use_entities and entities:
                     break
+                LAST_PROCESS_ERROR = f"edit BadRequest: {e}"
                 if "message to edit not found" in err or "message_id_invalid" in err:
                     return "not_found"
                 if "message can't be edited" in err or "message cannot be edited" in err:
@@ -678,9 +649,11 @@ async def safe_edit_post_without_trigger(
                 logger.warning(f"⚠️ تعذر تعديل المنشور ({chat_id}, {message_id}): {e}")
                 return "error"
             except Forbidden as e:
+                LAST_PROCESS_ERROR = f"edit Forbidden: {e}"
                 logger.warning(f"⛔ لا توجد صلاحية تعديل في ({chat_id}): {e}")
                 return "forbidden"
             except TelegramError as e:
+                LAST_PROCESS_ERROR = f"edit Error: {e}"
                 logger.warning(f"⚠️ خطأ تيليجرام أثناء تعديل المنشور ({chat_id}, {message_id}): {e}")
                 return "error"
     return "error"
@@ -701,7 +674,7 @@ def get_or_init_channel(channel_id: int, title: str = "") -> Dict[str, Any]:
             "last_known_msg_id": 0,
             "posts": {},
             "candidates": {},
-            "checked_ids": [],
+            "poll_msg_ids": [],
         }
     else:
         if title:
@@ -712,16 +685,16 @@ def get_or_init_channel(channel_id: int, title: str = "") -> Dict[str, Any]:
         channels[ch_key].setdefault("last_known_msg_id", 0)
         channels[ch_key].setdefault("posts", {})
         channels[ch_key].setdefault("candidates", {})
-        channels[ch_key].setdefault("checked_ids", [])
+        channels[ch_key].setdefault("poll_msg_ids", [])
     return channels[ch_key]
 
 
-def mark_msg_checked(ch_data: Dict[str, Any], msg_id: int):
-    checked = ch_data.setdefault("checked_ids", [])
-    if msg_id not in checked:
-        checked.append(msg_id)
-        if len(checked) > 1500:
-            del checked[:len(checked) - 1500]
+def record_poll_msg_id(ch_data: Dict[str, Any], poll_msg_id: int):
+    pm = ch_data.setdefault("poll_msg_ids", [])
+    if poll_msg_id not in pm:
+        pm.append(poll_msg_id)
+        if len(pm) > 500:
+            del pm[:len(pm) - 500]
 
 
 def get_or_init_group(group_id: int, title: str = "", linked_channel_id: Optional[int] = None) -> Dict[str, Any]:
@@ -744,7 +717,7 @@ def remove_channel_data(channel_id: int | str):
     ch_key = str(channel_id)
     STATE.get("channels", {}).pop(ch_key, None)
 
-    if STATE.get("default_channel_id") == int(channel_id):
+    if str(STATE.get("default_channel_id")) == ch_key:
         STATE["default_channel_id"] = None
         STATE["is_running"] = False
 
@@ -776,9 +749,6 @@ def remove_group_data(group_id: int | str):
 
 
 async def inspect_chat_membership(bot, chat_id: int) -> Tuple[bool, bool, bool, bool, bool, str, str, Optional[int], Optional[int]]:
-    """
-    يرجع: (is_active, is_admin, can_post_messages, can_edit_messages, can_delete_messages, chat_type, title, linked_chat_id, pinned_msg_id)
-    """
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=bot.id)
         status = getattr(member, "status", "")
@@ -812,7 +782,6 @@ async def inspect_chat_membership(bot, chat_id: int) -> Tuple[bool, bool, bool, 
 
 
 async def sync_single_chat(bot, chat_id: int) -> Tuple[bool, str]:
-    """فحص وتحديث قناة أو مجموعة وإضافتها للذاكرة المحلية"""
     active, is_admin, can_post, can_edit, can_delete, ctype, title, linked_id, pinned_id = await inspect_chat_membership(bot, chat_id)
     if not active:
         remove_channel_data(chat_id)
@@ -864,7 +833,6 @@ async def sync_single_chat(bot, chat_id: int) -> Tuple[bool, str]:
 
 
 async def verify_all_registered_chats(bot):
-    """التحقق من كافة القنوات والمجموعات المسجلة وتنظيف ما خرج منه البوت"""
     ch_ids = [int(k) for k in list(STATE.get("channels", {}).keys())]
     grp_ids = [int(k) for k in list(STATE.get("known_groups", {}).keys())]
 
@@ -876,7 +844,7 @@ async def verify_all_registered_chats(bot):
     await save_local_now()
 
 
-# ==================== معالجة منشورات @like وتطبيق الاستفتاء ====================
+# ==================== معالجة منشورات الكلمة المفتاحية وتطبيق الاستفتاء ====================
 def is_service_message(msg) -> bool:
     service_attrs = (
         "new_chat_members",
@@ -902,7 +870,6 @@ def is_service_message(msg) -> bool:
 
 
 def _cache_channel_post_candidate(ch_data: Dict[str, Any], msg):
-    """يحفظ بيانات آخر المنشورات مؤقتاً للتعامل معها عند التشغيل أو الفحص اليدوي"""
     raw_text = msg.text if msg.text is not None else (msg.caption or "")
     if not raw_text:
         return
@@ -963,14 +930,11 @@ async def process_trigger_post(
     media_info: Optional[Tuple[str, str]] = None,
     is_album: bool = False,
 ) -> str:
-    """
-    يفحص المنشور: إذا بدأ بالكلمة المفتاحية (@like)، يحذفها ويرسل التصويت داخل نفس المنشور
-    (عبر sendPoll مع description و media وحذف الأصل)، أو يتراجع للرد إذا لم يدعم الحجم/النوع.
-    يرجع: 'added' | 'already' | 'no_trigger' | 'no_options' | 'forbidden' | 'error'
-    """
+    global LAST_PROCESS_ERROR
     settings = get_settings()
     options = settings.get("poll_options", [])
     if not options:
+        LAST_PROCESS_ERROR = "لا توجد عناصر تصويت محددة في الإعدادات."
         return "no_options"
 
     ch_data = get_or_init_channel(channel_id)
@@ -989,7 +953,6 @@ async def process_trigger_post(
         case_sensitive=case_sensitive,
     )
     if not matched:
-        mark_msg_checked(ch_data, msg_id)
         return "no_trigger"
 
     cleaned_stripped = cleaned_text.strip()
@@ -1003,12 +966,9 @@ async def process_trigger_post(
     can_combine_text = len(cleaned_stripped) <= 1024
     can_combine_media = (not is_media) or (media_info is not None and not is_album)
 
-    sent_poll_msg = None
-
-    # === 1) الدمج في رسالة واحدة فقط (نفس المنشور نفسه) ===
+    # === 1) الدمج في نفس المنشور (رسالة واحدة فقط) ===
     if can_delete and can_combine_text and can_combine_media:
         if not cleaned_stripped:
-            # منشور يحتوي على @like فقط (مع أو بدون وسائط)
             q_val = poll_question
             desc_val = None
             desc_ents = None
@@ -1047,8 +1007,7 @@ async def process_trigger_post(
                 "combined": True,
                 "created_at": int(time.time()),
             }
-            mark_msg_checked(ch_data, msg_id)
-            mark_msg_checked(ch_data, sent_poll_msg.message_id)
+            record_poll_msg_id(ch_data, sent_poll_msg.message_id)
             ch_data.get("candidates", {}).pop(m_key, None)
 
             if int(ch_data.get("last_known_msg_id", 0) or 0) < sent_poll_msg.message_id:
@@ -1058,7 +1017,7 @@ async def process_trigger_post(
             await save_local_now()
             return "added"
 
-    # === 2) المسار الاحتياطي (إذا كان النص > 1024 حرفاً، أو صوتية/ألبوم، أو بدون صلاحية حذف) ===
+    # === 2) المسار الاحتياطي ===
     reply_target_id: Optional[int] = msg_id
     deleted_original = False
 
@@ -1112,8 +1071,7 @@ async def process_trigger_post(
         "combined": False,
         "created_at": int(time.time()),
     }
-    mark_msg_checked(ch_data, msg_id)
-    mark_msg_checked(ch_data, sent_poll_msg.message_id)
+    record_poll_msg_id(ch_data, sent_poll_msg.message_id)
     ch_data.get("candidates", {}).pop(m_key, None)
 
     if int(ch_data.get("last_known_msg_id", 0) or 0) < sent_poll_msg.message_id:
@@ -1125,10 +1083,6 @@ async def process_trigger_post(
 
 
 async def _inspect_message_via_forward(bot, owner_id: int, channel_id: int, msg_id: int) -> Tuple[str, Optional[Any]]:
-    """
-    جلب بيانات منشور قديم في القناة عبر توجيهه صامتاً للمالك ثم حذفه فوراً.
-    يرجع: ('ok', Message) | ('not_found', None) | ('protected', None) | ('error', None)
-    """
     for _ in range(3):
         try:
             fwd = await bot.forward_message(
@@ -1160,23 +1114,24 @@ async def _inspect_message_via_forward(bot, owner_id: int, channel_id: int, msg_
 
 async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] = None) -> Dict[str, Any]:
     """
-    فحص يدوي لجميع منشورات القناة (من 1 وحتى آخر منشور معروف + استكشاف أي منشورات أحدث).
-    يفحص المنشورات المخزنة وكذلك المنشورات القديمة التي لم يرها البوت سابقاً.
+    يفحص كل منشورات القناة (من 1 حتى آخر منشور + استكشاف أحدث المنشورات).
+    لا يتخطى أي منشور عند تغيير الكلمة المفتاحية، فقط يتخطى المنشورات التي تم وضع استفتاء لها.
     """
     ch_data = get_or_init_channel(channel_id)
     last_id = int(ch_data.get("last_known_msg_id", 0) or 0)
-    candidates = ch_data.get("candidates", {})
     posts = ch_data.get("posts", {})
-    checked_set = set(int(x) for x in ch_data.get("checked_ids", []))
+    poll_msg_ids = set(int(x) for x in ch_data.get("poll_msg_ids", []))
+    candidates = ch_data.get("candidates", {})
 
     scanned_count = 0
     added_count = 0
     protected_hit = False
 
-    # 1) استكشاف للأمام إذا كانت هناك منشورات أحدث من آخر رقم معروف
-    if owner_id and last_id > 0:
+    # 1) استكشاف للأمام من last_id + 1 لاكتشاف أي منشورات وصلت خارج الجلسة
+    if owner_id:
+        probe_start = last_id + 1 if last_id > 0 else 1
         consecutive_missing = 0
-        for probe_id in range(last_id + 1, last_id + 31):
+        for probe_id in range(probe_start, probe_start + 50):
             st, fwd = await _inspect_message_via_forward(bot, owner_id, channel_id, probe_id)
             if st == "ok" and fwd:
                 last_id = probe_id
@@ -1194,15 +1149,15 @@ async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] =
                         media_info=_extract_poll_compatible_media(fwd),
                         is_album=bool(getattr(fwd, "media_group_id", None)),
                     )
-                else:
-                    mark_msg_checked(ch_data, probe_id)
-                    checked_set.add(probe_id)
+                elif getattr(fwd, "poll", None) is not None:
+                    record_poll_msg_id(ch_data, probe_id)
+                    poll_msg_ids.add(probe_id)
             elif st == "protected":
                 protected_hit = True
                 break
             elif st == "not_found":
                 consecutive_missing += 1
-                if consecutive_missing >= 5:
+                if consecutive_missing >= 15:
                     break
             await asyncio.sleep(0.15)
 
@@ -1214,12 +1169,49 @@ async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] =
             "protected": protected_hit,
         }
 
-    # 2) فحص كل منشورات القناة من 1 إلى last_id (مع تخطي ما تم فحصه سابقاً)
+    # 2) فحص كل منشورات القناة من 1 إلى last_id
     for mid in range(1, last_id + 1):
         m_key = str(mid)
-        if m_key in posts or mid in checked_set:
+        if m_key in posts or mid in poll_msg_ids:
             continue
 
+        # قراءة مباشرة عبر forward_message إن أمكن لضمان حداثة النص حتى بعد أي تعديل
+        if owner_id and not protected_hit:
+            st, fwd = await _inspect_message_via_forward(bot, owner_id, channel_id, mid)
+            if st == "protected":
+                protected_hit = True
+            elif st == "not_found":
+                continue
+            elif st == "ok" and fwd:
+                scanned_count += 1
+                if getattr(fwd, "poll", None) is not None:
+                    record_poll_msg_id(ch_data, mid)
+                    poll_msg_ids.add(mid)
+                    continue
+                if is_service_message(fwd):
+                    continue
+                raw_text = fwd.text if fwd.text is not None else (fwd.caption or "")
+                if not raw_text:
+                    continue
+                ents = fwd.entities if fwd.text is not None else fwd.caption_entities
+                res = await process_trigger_post(
+                    bot=bot,
+                    channel_id=channel_id,
+                    msg_id=mid,
+                    raw_text=raw_text,
+                    entities=ents,
+                    is_media=_is_media_message(fwd),
+                    media_info=_extract_poll_compatible_media(fwd),
+                    is_album=bool(getattr(fwd, "media_group_id", None)),
+                )
+                if res == "added":
+                    added_count += 1
+                elif res in ("forbidden", "no_options"):
+                    break
+                await asyncio.sleep(0.18)
+                continue
+
+        # في حال تعذر forward_message (حماية المحتوى)، نعتمد على الكاش إن وجد
         cand = candidates.get(m_key)
         if cand:
             scanned_count += 1
@@ -1237,60 +1229,9 @@ async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] =
             )
             if res == "added":
                 added_count += 1
-            elif res == "no_trigger":
-                mark_msg_checked(ch_data, mid)
-                checked_set.add(mid)
             elif res in ("forbidden", "no_options"):
                 break
             await asyncio.sleep(0.15)
-            continue
-
-        if not owner_id or protected_hit:
-            continue
-
-        st, fwd = await _inspect_message_via_forward(bot, owner_id, channel_id, mid)
-        if st == "protected":
-            protected_hit = True
-            continue
-        if st == "not_found":
-            mark_msg_checked(ch_data, mid)
-            checked_set.add(mid)
-            continue
-        if st != "ok" or not fwd:
-            continue
-
-        scanned_count += 1
-        if getattr(fwd, "poll", None) is not None or is_service_message(fwd):
-            mark_msg_checked(ch_data, mid)
-            checked_set.add(mid)
-            continue
-
-        raw_text = fwd.text if fwd.text is not None else (fwd.caption or "")
-        if not raw_text:
-            mark_msg_checked(ch_data, mid)
-            checked_set.add(mid)
-            continue
-
-        ents = fwd.entities if fwd.text is not None else fwd.caption_entities
-        res = await process_trigger_post(
-            bot=bot,
-            channel_id=channel_id,
-            msg_id=mid,
-            raw_text=raw_text,
-            entities=ents,
-            is_media=_is_media_message(fwd),
-            media_info=_extract_poll_compatible_media(fwd),
-            is_album=bool(getattr(fwd, "media_group_id", None)),
-        )
-        if res == "added":
-            added_count += 1
-        elif res == "no_trigger":
-            mark_msg_checked(ch_data, mid)
-            checked_set.add(mid)
-        elif res in ("forbidden", "no_options"):
-            break
-
-        await asyncio.sleep(0.2)
 
     await save_local_now()
     return {
@@ -1406,6 +1347,17 @@ def build_control_panel_text() -> str:
     multi_label = "مربعات تحديد + زر تقديم التصويت التلقائي" if settings.get("allows_multiple_answers", True) else "اختيار واحد فوري"
     revote_label = "مسموح بتغيير التصويت" if settings.get("allows_revoting", False) else "مقفل (لا يقبل التصويت الثاني)"
 
+    if LAST_SEEN_CHANNEL_POST:
+        seen_age = int(time.time() - LAST_SEEN_CHANNEL_POST["ts"])
+        seen_line = (
+            f"منشور #{LAST_SEEN_CHANNEL_POST['msg_id']} "
+            f"(منذ {seen_age}ث): «{_html_escape(LAST_SEEN_CHANNEL_POST['preview'])}»"
+        )
+    else:
+        seen_line = "لم يصل منشور قناة جديد بعد في هذه الجلسة"
+
+    conflict_line = f"\n⚠️ <b>تحذير تعارض:</b> رُصد ({CONFLICT_COUNT}) تضارب مع نسخة أخرى للبوت!" if CONFLICT_COUNT > 0 else ""
+
     sync_age = (
         f"منذ {int((time.time() - LAST_GITHUB_SYNC_TS) // 60)} دقيقة"
         if LAST_GITHUB_SYNC_TS > 0
@@ -1420,8 +1372,9 @@ def build_control_panel_text() -> str:
         f"• <b>القناة الافتراضية:</b> {ch_line}\n"
         f"• <b>المجموعة الافتراضية:</b> {grp_line}\n"
         f"• <b>آخر رقم منشور معروف:</b> <code>{last_mid_line}</code>\n"
+        f"• <b>آخر تحديث وصله البوت:</b> {seen_line}{conflict_line}\n"
         f"• <b>القنوات المكتشفة:</b> {len(channels)} | <b>المجموعات:</b> {len(groups)}\n\n"
-        f"• <b>الكلمة المفتاحية في بداية المنشور:</b> <code>{trig}</code>\n"
+        f"• <b>الكلمة المفتاحية:</b> <code>{trig}</code>\n"
         f"• <b>سؤال الاستفتاء:</b> {q_txt}\n"
         f"• <b>نمط التحديد:</b> {multi_label}\n"
         f"• <b>التصويت المتكرر:</b> {revote_label}\n"
@@ -1448,12 +1401,13 @@ def build_control_panel_markup() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🔍 فحص كل منشورات القناة", callback_data="p:scan_all"),
-            InlineKeyboardButton("🔄 تحديث القنوات والمجموعات", callback_data="p:refresh"),
+            InlineKeyboardButton("🩺 تشخيص الحالة والمنشورات", callback_data="p:diag"),
         ],
         [
+            InlineKeyboardButton("🔄 تحديث القنوات والمجموعات", callback_data="p:refresh"),
             InlineKeyboardButton("💾 حفظ s.json على GitHub الآن", callback_data="p:sync"),
-            InlineKeyboardButton("❓ تعليمات الإعداد", callback_data="p:help"),
         ],
+        [InlineKeyboardButton("❓ تعليمات الإعداد", callback_data="p:help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -1760,7 +1714,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
 
         await save_local_now()
         await msg.reply_text(f"{'✅' if ok else '⚠️'} {info}")
-        if ok and STATE.get("is_running") and STATE.get("default_channel_id") == fwd_chat_id and fwd_msg_id:
+        if ok and STATE.get("is_running") and str(STATE.get("default_channel_id")) == str(fwd_chat_id) and fwd_msg_id:
             cand = STATE["channels"][str(fwd_chat_id)].get("candidates", {}).get(str(fwd_msg_id))
             if cand:
                 m_list = cand.get("media_info")
@@ -1835,12 +1789,82 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     await send_or_edit_panel(msg, edit=False)
 
 
+async def run_diagnostic_report(bot, owner_id: int) -> str:
+    """فحص وتشخيص حالة البوت والقناة وإمكانية قراءة المنشورات"""
+    me = await bot.get_me()
+    wh = await bot.get_webhook_info()
+    wh_url = getattr(wh, "url", "") or "غير مفعّل (Polling يعمل)"
+    wh_err = getattr(wh, "last_error_message", "") or "لا يوجد"
+
+    lines = [
+        "🩺 <b>تقرير التشخيص الحي للبوت</b>",
+        f"• <b>حساب البوت:</b> @{_html_escape(me.username)} (<code>{me.id}</code>)",
+        f"• <b>الوضع الحالي:</b> {'🟢 يعمل' if STATE.get('is_running') else '⏸ متوقف'}",
+        f"• <b>Webhook:</b> {_html_escape(wh_url)}",
+        f"• <b>آخر خطأ Webhook:</b> {_html_escape(wh_err)}",
+        f"• <b>تعارض نسخ (Conflict):</b> {CONFLICT_COUNT}",
+        f"• <b>الكلمة المفتاحية:</b> <code>{_html_escape(get_settings().get('trigger_word'))}</code>",
+    ]
+
+    if LAST_SEEN_CHANNEL_POST:
+        lines.append(
+            f"• <b>آخر تحديث قناة التقطه البوت:</b> #{LAST_SEEN_CHANNEL_POST['msg_id']} "
+            f"في <code>{LAST_SEEN_CHANNEL_POST['chat_id']}</code> "
+            f"«{_html_escape(LAST_SEEN_CHANNEL_POST['preview'])}»"
+        )
+    else:
+        lines.append("• <b>آخر تحديث قناة التقطه البوت:</b> لم يصل أي تحديث channel_post منذ بدء الجلسة الحالية")
+
+    if LAST_PROCESS_ERROR:
+        lines.append(f"• <b>آخر خطأ تنفيذ:</b> <code>{_html_escape(LAST_PROCESS_ERROR)}</code>")
+
+    def_ch = STATE.get("default_channel_id")
+    if not def_ch:
+        lines.append("\n❌ <b>لا توجد قناة افتراضية محددة!</b>")
+    else:
+        active, is_admin, can_post, can_edit, can_delete, ctype, title, _, _ = await inspect_chat_membership(bot, int(def_ch))
+        lines.append(f"\n📢 <b>القناة الافتراضية:</b> {_html_escape(title or str(def_ch))} (<code>{def_ch}</code>)")
+        lines.append(f"• موجود: {'✅' if active else '❌'} | مشرف: {'✅' if is_admin else '❌'}")
+        lines.append(f"• نشر: {'✅' if can_post else '❌'} | تعديل: {'✅' if can_edit else '❌'} | حذف: {'✅' if can_delete else '❌'}")
+
+        ch_data = STATE.get("channels", {}).get(str(def_ch), {})
+        last_id = int(ch_data.get("last_known_msg_id", 0) or 0)
+        lines.append(f"• آخر رقم منشور مسجل: <code>{last_id}</code>")
+
+        # محاولة استكشاف أحدث منشور فعلي في القناة عبر forward_message
+        probe_start = max(1, last_id)
+        found_id = 0
+        found_preview = ""
+        prot_note = ""
+        for pid in range(probe_start, probe_start + 15):
+            st, fwd = await _inspect_message_via_forward(bot, owner_id, int(def_ch), pid)
+            if st == "ok" and fwd:
+                found_id = pid
+                txt = (fwd.text or fwd.caption or ("[استفتاء]" if getattr(fwd, "poll", None) else "[وسائط بدون نص]"))
+                found_preview = txt[:60]
+            elif st == "protected":
+                prot_note = "⚠️ حماية المحتوى مفعّلة في القناة."
+                break
+            await asyncio.sleep(0.1)
+
+        if found_id > 0:
+            if found_id > last_id:
+                ch_data["last_known_msg_id"] = found_id
+                await save_local_now()
+            lines.append(f"• <b>اختبار قراءة أحدث منشور فعلي:</b> ✅ منشور #{found_id}: «{_html_escape(found_preview)}»")
+        elif prot_note:
+            lines.append(f"• {prot_note}")
+        else:
+            lines.append("• <b>اختبار القراءة:</b> تعذر العثور على منشورات حول الرقم المسجل. أعد توجيه آخر منشور من القناة إلى هنا.")
+
+    return "\n".join(lines)
+
+
 async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.data or not query.data.startswith("p:"):
         return
 
-    # إغلاق استعلام الزر بصمت تام بدون أي رسائل منبثقة نهائياً
     await query.answer()
 
     if not is_owner(query.from_user.id):
@@ -1853,6 +1877,13 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     settings = get_settings()
 
     if action == "home":
+        await send_or_edit_panel(query.message, edit=True)
+        return
+
+    if action == "diag":
+        wait_msg = await query.message.reply_text("🩺 جاري فحص وتشخيص القناة والمنشورات...")
+        report = await run_diagnostic_report(context.bot, query.from_user.id)
+        await wait_msg.edit_text(report, parse_mode="HTML")
         await send_or_edit_panel(query.message, edit=True)
         return
 
@@ -1926,7 +1957,7 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["pending_action"] = {"type": "set_trigger"}
         await query.message.reply_text(
             f"🏷️ الكلمة المفتاحية الحالية: <code>{_html_escape(settings.get('trigger_word', DEFAULT_TRIGGER_WORD))}</code>\n\n"
-            "أرسل الكلمة المفتاحية الجديدة التي يبدأ بها المنشور (مثال: <code>@like</code> أو <code>#تصويت</code>).\n"
+            "أرسل الكلمة المفتاحية الجديدة التي يبدأ بها المنشور (مثال: <code>@like</code> أو <code>$bot</code>).\n"
             "للتراجع أرسل /cancel",
             parse_mode="HTML",
         )
@@ -2040,7 +2071,7 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
             trig = settings.get("trigger_word", DEFAULT_TRIGGER_WORD)
             await query.message.reply_text(
                 f"▶️ تم تشغيل المراقبة الفورية! أي منشور جديد يبدأ بـ {trig} سيتم تحويله للتصويت فوراً.\n"
-                "💡 لفحص المنشورات السابقة في القناة يدوياً، اضغط زر «🔍 فحص كل منشورات القناة»."
+                "💡 لفحص كل المنشورات السابقة في القناة يدوياً، اضغط زر «🔍 فحص كل منشورات القناة»."
             )
         return
 
@@ -2062,19 +2093,20 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         trig = settings.get("trigger_word", DEFAULT_TRIGGER_WORD)
         if res["last_id"] == 0:
             await status_msg.edit_text(
-                "⚠️ لا يوجد رقم منشور معروف بعد لهذه القناة.\n"
-                "أعد توجيه آخر منشور من القناة هنا حتى يتعرف البوت على عدد منشوراتها ثم اضغط فحص."
+                "⚠️ لم أجد أي منشورات معروفة في القناة حتى الآن.\n"
+                "أعد توجيه آخر منشور من القناة إلى هنا ثم اضغط «🔍 فحص كل منشورات القناة»."
             )
         else:
             extra = (
-                "\n⚠️ ملاحظة: القناة مفعّل فيها حماية المحتوى، لذا تم فحص المنشورات التي وصلت للبوت فقط."
+                "\n⚠️ ملاحظة: القناة مفعّل فيها حماية المحتوى، لذا تم فحص المنشورات المخزنة فقط."
                 if res["protected"]
                 else ""
             )
+            err_note = f"\n⚠️ آخر خطأ: {LAST_PROCESS_ERROR}" if LAST_PROCESS_ERROR else ""
             await status_msg.edit_text(
                 f"✅ اكتمل فحص كل منشورات القناة (حتى منشور رقم {res['last_id']}).\n"
-                f"• منشورات جديدة تم فحصها الآن: {res['scanned']}\n"
-                f"• منشورات تبدأ بـ {trig} وتمت معالجتها: {res['added']}{extra}"
+                f"• منشورات تم فحصها الآن: {res['scanned']}\n"
+                f"• منشورات تبدأ بـ {trig} وتمت معالجتها: {res['added']}{extra}{err_note}"
             )
         await send_or_edit_panel(query.message, edit=True)
         return
@@ -2110,7 +2142,49 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 
-# ==================== معالجات القنوات والمجموعات ====================
+# ==================== معالجات القنوات والمجموعات والتتبع التشخيصي ====================
+async def track_any_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """متعقّب غير معوّق في group=-1 لتسجيل كل تحديث قناة يصل للبوت فعلياً"""
+    global LAST_SEEN_CHANNEL_POST
+    cp = getattr(update, "channel_post", None) or getattr(update, "edited_channel_post", None)
+    if cp and getattr(cp, "chat", None):
+        txt = (cp.text or cp.caption or "[وسائط/استفتاء]")[:45]
+        LAST_SEEN_CHANNEL_POST = {
+            "chat_id": cp.chat.id,
+            "msg_id": cp.message_id,
+            "preview": txt,
+            "ts": time.time(),
+        }
+        logger.info(f"📩 وصل تحديث قناة: chat={cp.chat.id}, msg={cp.message_id}, text='{txt}'")
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    global CONFLICT_COUNT, CONFLICT_NOTIFIED, LAST_PROCESS_ERROR
+    err = context.error
+    if isinstance(err, Conflict):
+        CONFLICT_COUNT += 1
+        logger.error(f"🚨 تعارض (Conflict): توجد نسخة أخرى تعمل بنفس التوكن! ({CONFLICT_COUNT})")
+        if not CONFLICT_NOTIFIED and STATE.get("owner_id"):
+            CONFLICT_NOTIFIED = True
+            try:
+                await context.bot.send_message(
+                    chat_id=int(STATE["owner_id"]),
+                    text=(
+                        "🚨 <b>تنبيه هام (سبب عدم رؤية المنشورات):</b>\n"
+                        "توجد نسخة ثانية من البوت تعمل في نفس الوقت بنفس التوكن (Conflict)، "
+                        "ولذلك تسرق التحديثات والمنشورات!\n"
+                        "أوقف أي تشغيل قديم على GitHub Actions واترك نسخة واحدة فقط تعمل."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        return
+
+    LAST_PROCESS_ERROR = str(err)
+    logger.exception("خطأ غير متوقع في معالج البوت:", exc_info=err)
+
+
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmu = update.my_chat_member
     if not cmu:
@@ -2160,13 +2234,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     _cache_channel_post_candidate(ch_data, msg)
 
-    if not STATE.get("is_running") or STATE.get("default_channel_id") != channel_id:
+    def_ch = STATE.get("default_channel_id")
+    if not STATE.get("is_running") or str(def_ch) != str(channel_id):
         await save_local_now()
         return
 
     raw_text = msg.text if msg.text is not None else (msg.caption or "")
     if not raw_text:
-        mark_msg_checked(ch_data, msg.message_id)
         await save_local_now()
         return
 
@@ -2183,7 +2257,6 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         case_sensitive=bool(settings.get("case_sensitive_trigger", False)),
     )
     if not matched:
-        mark_msg_checked(ch_data, msg.message_id)
         await save_local_now()
         return
 
@@ -2196,7 +2269,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         SEEN_MEDIA_GROUPS[mg_key] = now
 
-    await process_trigger_post(
+    res = await process_trigger_post(
         bot=context.bot,
         channel_id=channel_id,
         msg_id=msg.message_id,
@@ -2206,6 +2279,18 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         media_info=media_info,
         is_album=bool(mg_id),
     )
+
+    if res in ("forbidden", "no_options", "error") and STATE.get("owner_id"):
+        try:
+            await context.bot.send_message(
+                chat_id=int(STATE["owner_id"]),
+                text=(
+                    f"⚠️ تعذر إضافة التصويت للمنشور #{msg.message_id} في «{channel_title}».\n"
+                    f"السبب: {LAST_PROCESS_ERROR or res}"
+                ),
+            )
+        except Exception:
+            pass
 
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2257,8 +2342,12 @@ async def background_loop(app):
 
 
 async def on_post_init(app):
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=False)
+    except Exception as e:
+        logger.warning(f"تنبيه delete_webhook: {e}")
     asyncio.create_task(background_loop(app))
-    logger.info("✅ تم تشغيل البوت الثاني بنجاح (المراقبة الفورية + الدمج في منشور واحد + الفحص الشامل اليدوي).")
+    logger.info("✅ تم تشغيل البوت الثاني بنجاح (التشخيص الحي + الدمج في منشور واحد + الفحص الشامل اليدوي).")
 
 
 def main():
@@ -2270,6 +2359,7 @@ def main():
         .build()
     )
 
+    app.add_handler(TypeHandler(Update, track_any_update), group=-1)
     app.add_handler(CommandHandler(["start", "panel", "menu"], cmd_start))
     app.add_handler(CommandHandler(["cancel"], cmd_cancel))
     app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
@@ -2277,6 +2367,7 @@ def main():
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, handle_channel_post))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, handle_group_message))
     app.add_handler(CallbackQueryHandler(handle_panel_callback, pattern=r"^p:"))
+    app.add_error_handler(global_error_handler)
 
     print("🚀 تم تشغيل البوت الثاني (bot2.py).")
     app.run_polling(
