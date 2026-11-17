@@ -1,0 +1,56 @@
+{
+  "channels": {
+    "-1002527184826": {
+      "title": "Sky Stars",
+      "linked_group_id": -1002383098026,
+      "linked_group_title": "⁨Sky Stars⁩ محادثة",
+      "can_post_messages": true,
+      "can_edit_messages": true,
+      "can_delete_messages": true,
+      "last_known_msg_id": 36,
+      "posts": {},
+      "candidates": {
+        "31": {
+          "text": "وأحلى وأحلى يا شباب أن لما بتعمل تحويل من القناة الأزرار مش بتكون معاه لأن الأزرار في القناة فقط وكده اللي عاوز يصوت يجب أن يدخل على القناة.",
+          "entities": [],
+          "is_media": false
+        }
+      },
+      "checked_ids": [
+        32,
+        33,
+        34,
+        31,
+        35,
+        36
+      ],
+      "poll_msg_ids": []
+    }
+  },
+  "group_post_map": {},
+  "owner_id": 6701042883,
+  "is_running": true,
+  "default_channel_id": -1002527184826,
+  "default_group_id": -1002383098026,
+  "known_groups": {
+    "-1002383098026": {
+      "title": "⁨Sky Stars⁩ محادثة",
+      "linked_channel_id": -1002527184826
+    }
+  },
+  "settings": {
+    "trigger_word": "$bot",
+    "case_sensitive_trigger": false,
+    "poll_question": "📊 قيّم هذا المنشور:",
+    "poll_options": [
+      "إعجاب_Like"
+    ],
+    "allows_multiple_answers": true,
+    "allows_revoting": false,
+    "shuffle_options": false,
+    "hide_results_until_closes": false,
+    "scan_limit": 10,
+    "delete_trigger_only_post": true,
+    "use_post_text_as_question": false
+  }
+}
