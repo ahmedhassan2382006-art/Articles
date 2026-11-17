@@ -32,7 +32,7 @@
       "id": 1793802556,
       "name": "مصدر إخباري",
       "url": "https://aitnews.com/feed/",
-      "last_id": "https://aitnews.com/?p=609394",
+      "last_id": "https://aitnews.com/?p=609417",
       "topics": {
         "-1003924183926": 4060
       }
@@ -50,7 +50,7 @@
       "id": 1793810546,
       "name": "Softpedia Windows / All",
       "url": "https://www.softpedia.com/backend.xml",
-      "last_id": "https://www.softpedia.com/get/Multimedia/Graphic/Graphic-Editors/PhotoResizerOK.shtml",
+      "last_id": "https://www.softpedia.com/get/PORTABLE-SOFTWARE/System/Rufus-Portable.shtml",
       "topics": {
         "-1003924183926": 4062
       }
@@ -59,7 +59,7 @@
       "id": 1793810597,
       "name": "MajorGeeks.Com",
       "url": "https://www.majorgeeks.com/files/rss",
-      "last_id": "f663f9611797bc22f867ad4b6938a1713df48002",
+      "last_id": "0e1a00068b65876661375f0365cb5a2bc6488c09",
       "topics": {
         "-1003924183926": 4063
       }
@@ -68,7 +68,7 @@
       "id": 1793810653,
       "name": "عرّفني",
       "url": "https://3arrafni.com/feed/",
-      "last_id": "https://3arrafni.com/tech-news/windows-activation-error-0x80041008-emergency-fix",
+      "last_id": "https://3arrafni.com/tech-news/google-project-zero-30-day-bug-fix-deadline",
       "topics": {
         "-1003924183926": 4064
       }
@@ -86,7 +86,7 @@
       "id": 1793811206,
       "name": "TechCrunch",
       "url": "https://techcrunch.com/feed/",
-      "last_id": "https://techcrunch.com/?p=3189297",
+      "last_id": "https://techcrunch.com/?p=3189502",
       "topics": {
         "-1003924183926": 4066
       }
