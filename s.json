@@ -7,7 +7,7 @@
       "can_post_messages": true,
       "can_edit_messages": true,
       "can_delete_messages": true,
-      "last_known_msg_id": 34,
+      "last_known_msg_id": 36,
       "posts": {},
       "candidates": {
         "31": {
@@ -20,7 +20,9 @@
         32,
         33,
         34,
-        31
+        31,
+        35,
+        36
       ]
     }
   },
