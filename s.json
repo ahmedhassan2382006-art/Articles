@@ -7,16 +7,22 @@
       "can_post_messages": true,
       "can_edit_messages": true,
       "can_delete_messages": true,
-      "last_known_msg_id": 0,
+      "last_known_msg_id": 31,
       "posts": {},
-      "candidates": {}
+      "candidates": {
+        "31": {
+          "text": "وأحلى وأحلى يا شباب أن لما بتعمل تحويل من القناة الأزرار مش بتكون معاه لأن الأزرار في القناة فقط وكده اللي عاوز يصوت يجب أن يدخل على القناة.",
+          "entities": [],
+          "is_media": false
+        }
+      }
     }
   },
   "group_post_map": {},
   "owner_id": 6701042883,
-  "is_running": false,
-  "default_channel_id": null,
-  "default_group_id": null,
+  "is_running": true,
+  "default_channel_id": -1002527184826,
+  "default_group_id": -1002383098026,
   "known_groups": {
     "-1002383098026": {
       "title": "⁨Sky Stars⁩ محادثة",
