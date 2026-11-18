@@ -9,16 +9,16 @@
   "settings": {
     "trigger_word": "$bot",
     "case_sensitive_trigger": false,
-    "poll_question": "📊 قيّم هذا المنشور:",
     "poll_options": [
       "إعجاب_Like"
     ],
     "allows_multiple_answers": true,
     "allows_revoting": false,
-    "shuffle_options": false,
-    "hide_results_until_closes": false,
     "scan_limit": 10,
-    "delete_trigger_only_post": true,
-    "use_post_text_as_question": false
+    "button_options": [
+      "إعجاب_Like"
+    ],
+    "show_vote_counts": true,
+    "vertical_buttons": false
   }
 }
