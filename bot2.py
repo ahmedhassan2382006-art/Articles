@@ -1,5 +1,5 @@
 import os, re, sys, json, base64, time, logging, asyncio
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 import requests
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -73,7 +73,8 @@ def _extract_tok(raw: str) -> Optional[str]:
 
 
 def load_token() -> Optional[str]:
-    if tok := _extract_tok(os.environ.get("LIKE", "")):
+    tok = _extract_tok(os.environ.get("LIKE", ""))
+    if tok:
         return tok
     if GITHUB_TOKEN:
         for url in TOKEN_URLS:
@@ -81,13 +82,17 @@ def load_token() -> Optional[str]:
                 r = requests.get(url, headers=_gh_headers(), timeout=12)
                 if r.status_code == 200:
                     txt = base64.b64decode(r.json().get("content", "")).decode("utf-8-sig")
-                    if tok := _extract_tok(txt):
+                    tok = _extract_tok(txt)
+                    if tok:
                         return tok
             except Exception as e:
                 logger.warning(f"خطأ جلب التوكن من {url}: {e}")
     if os.path.exists("t.txt"):
-        with open("t.txt", "r", encoding="utf-8-sig") as f:
-            return _extract_tok(f.read())
+        try:
+            with open("t.txt", "r", encoding="utf-8-sig") as f:
+                return _extract_tok(f.read())
+        except Exception as e:
+            logger.error(f"خطأ قراءة t.txt: {e}")
     return None
 
 
@@ -121,8 +126,11 @@ def _def_state() -> Dict[str, Any]:
 def _normalize(cfg: Any) -> Dict[str, Any]:
     cfg = cfg if isinstance(cfg, dict) else {}
     for k, v in _def_state().items():
-        if k != "settings":
-            cfg.setdefault(k, v if not isinstance(v, dict) else {})
+        if k == "settings":
+            continue
+        if k not in cfg or (isinstance(v, dict) and not isinstance(cfg.get(k), dict)):
+            cfg[k] = {} if isinstance(v, dict) else v
+
     for ch in cfg["channels"].values():
         if isinstance(ch, dict):
             ch.pop("poll_msg_ids", None)
@@ -130,6 +138,7 @@ def _normalize(cfg: Any) -> Dict[str, Any]:
             if isinstance(posts, dict):
                 for mk in [k for k, v in posts.items() if not isinstance(v, dict) or "votes" not in v]:
                     posts.pop(mk, None)
+
     s = cfg.get("settings") if isinstance(cfg.get("settings"), dict) else {}
     if "button_options" not in s and isinstance(s.get("poll_options"), list):
         s["button_options"] = list(s["poll_options"])
@@ -162,8 +171,11 @@ def _push_github() -> bool:
     global GITHUB_SHA
     if not GITHUB_TOKEN or not os.path.exists(LOCAL_STATE_PATH):
         return False
-    with open(LOCAL_STATE_PATH, "rb") as f:
-        raw = f.read()
+    try:
+        with open(LOCAL_STATE_PATH, "rb") as f:
+            raw = f.read()
+    except Exception:
+        return False
     for _ in range(3):
         try:
             if not GITHUB_SHA:
@@ -300,8 +312,10 @@ def _deser_ents(raw: Any) -> List[MessageEntity]:
     out = []
     for d in (raw or []):
         try:
-            out.append(MessageEntity(type=d["type"], offset=int(d["offset"]), length=int(d["length"]),
-                                     url=d.get("url"), language=d.get("language"), custom_emoji_id=d.get("custom_emoji_id")))
+            out.append(MessageEntity(
+                type=d["type"], offset=int(d["offset"]), length=int(d["length"]),
+                url=d.get("url"), language=d.get("language"), custom_emoji_id=d.get("custom_emoji_id"),
+            ))
         except Exception:
             pass
     return out
@@ -417,7 +431,8 @@ async def inspect_chat(bot, cid: int) -> Tuple[str, bool, bool, str, str, Option
         can_edit = True if st == "creator" else (bool(getattr(m, "can_edit_messages", False)) if st == "administrator" else False)
         c = await bot.get_chat(cid)
         pin = getattr(c, "pinned_message", None)
-        return "ok", is_admin, can_edit, getattr(c, "type", ""), getattr(c, "title", "") or str(cid), getattr(c, "linked_chat_id", None), (getattr(pin, "message_id", None) if pin else None), bool(getattr(c, "has_protected_content", False))
+        pin_id = getattr(pin, "message_id", None) if pin else None
+        return "ok", is_admin, can_edit, getattr(c, "type", ""), getattr(c, "title", "") or str(cid), getattr(c, "linked_chat_id", None), pin_id, bool(getattr(c, "has_protected_content", False))
     except Forbidden:
         return "removed", False, False, "", "", None, None, False
     except BadRequest as e:
@@ -520,7 +535,6 @@ async def process_post(bot, ch_id: int, mid: int, raw: str, ents: Any, is_med: b
     if not matched:
         return "no_trigger"
 
-    # إذا كان النص ما زال يبدأ بالكلمة المفتاحية، فهذا دليل أنه لم يُعدَّل بعد حتى لو كان رقمه مسجلاً
     if mk in posts and not force and not matched:
         return "already"
 
@@ -584,7 +598,8 @@ async def scan_channel(bot, ch_id: int, owner_id: int) -> Dict[str, Any]:
     scanned, added = 0, 0
 
     if not is_prot:
-        probe, miss = (last_id + 1 if last_id > 0 else 1), 0
+        probe = last_id + 1 if last_id > 0 else 1
+        miss = 0
         for pid in range(probe, probe + 50):
             st, fwd = await _fwd_read(bot, owner_id, ch_id, pid, is_prot)
             if st == "ok" and fwd:
@@ -634,8 +649,8 @@ async def scan_channel(bot, ch_id: int, owner_id: int) -> Dict[str, Any]:
                 await asyncio.sleep(0.12)
                 continue
 
-        # مسار احتياطي إذا كانت القناة محمية أو تعذرت القراءة المباشرة
-        if cand := cands.get(mk):
+        cand = cands.get(mk)
+        if cand:
             scanned += 1
             res = await process_post(bot, ch_id, mid, cand.get("text", ""), _deser_ents(cand.get("entities")), bool(cand.get("is_media", False)), force=True)
             if res == "added":
@@ -655,25 +670,31 @@ def _extract_fwd(msg) -> Tuple[Optional[int], Optional[int]]:
         chat = getattr(orig, "chat", None) or getattr(orig, "sender_chat", None)
         if chat:
             return chat.id, getattr(orig, "message_id", None)
-    if fc := getattr(msg, "forward_from_chat", None):
+    fc = getattr(msg, "forward_from_chat", None)
+    if fc:
         return fc.id, getattr(msg, "forward_from_message_id", None)
     return None, None
 
 
-def _parse_link(text: str) -> Tuple[Optional[int | str], Optional[int]]:
+def _parse_link(text: str) -> Tuple[Optional[Union[int, str]], Optional[int]]:
     t = text.strip()
-    if m := re.search(r"t\.me/c/(\d+)/(\d+)", t):
+    m = re.search(r"t\.me/c/(\d+)/(\d+)", t)
+    if m:
         return int(f"-100{m.group(1)}"), int(m.group(2))
-    if m := re.search(r"t\.me/c/(\d+)(?:/|\?|$|\s)", t):
+    m = re.search(r"t\.me/c/(\d+)(?:/|\?|$|\s)", t)
+    if m:
         return int(f"-100{m.group(1)}"), None
-    if m := re.search(r"t\.me/([A-Za-z0-9_]{4,})/(\d+)", t):
+    m = re.search(r"t\.me/([A-Za-z0-9_]{4,})/(\d+)", t)
+    if m:
         return f"@{m.group(1)}", int(m.group(2))
-    if m := re.search(r"t\.me/([A-Za-z0-9_]{4,})(?:/|\?|$|\s)", t):
-        if m.group(1).lower() not in ("joinchat", "addstickers", "addemoji", "share"):
-            return f"@{m.group(1)}", None
-    if m := re.search(r"(?:^|\s)(@[A-Za-z0-9_]{4,})", t):
+    m = re.search(r"t\.me/([A-Za-z0-9_]{4,})(?:/|\?|$|\s)", t)
+    if m and m.group(1).lower() not in ("joinchat", "addstickers", "addemoji", "share"):
+        return f"@{m.group(1)}", None
+    m = re.search(r"(?:^|\s)(@[A-Za-z0-9_]{4,})", t)
+    if m:
         return m.group(1), None
-    if m := re.search(r"(?:^|\s)(-100\d{5,}|-\d{5,})(?:\s|$)", t):
+    m = re.search(r"(?:^|\s)(-100\d{5,}|-\d{5,})(?:\s|$)", t)
+    if m:
         return int(m.group(1)), None
     return None, None
 
@@ -733,7 +754,8 @@ def panel_kb() -> InlineKeyboardMarkup:
 
 def opts_view() -> Tuple[str, InlineKeyboardMarkup]:
     opts = get_s().get("button_options", [])
-    txt = "🧩 <b>إدارة الأزرار التفاعلية (1 - 12)</b>\n\n" + ("\n".join(f"<b>{i+1}.</b> {_esc(o)}" for i, o in enumerate(opts)) or "❌ لا توجد أزرار.")
+    list_txt = "\n".join(f"<b>{i+1}.</b> {_esc(o)}" for i, o in enumerate(opts)) or "❌ لا توجد أزرار."
+    txt = f"🧩 <b>إدارة الأزرار التفاعلية (1 - 12)</b>\n\n{list_txt}"
     rows = [[InlineKeyboardButton("➕ إضافة زر", callback_data="p:oadd")]] if len(opts) < 12 else []
     for i, o in enumerate(opts):
         r = [InlineKeyboardButton(f"✏️ {i+1}: {o[:18]}", callback_data=f"p:oedit:{i}")]
@@ -749,7 +771,7 @@ def opts_view() -> Tuple[str, InlineKeyboardMarkup]:
 def cfg_view() -> Tuple[str, InlineKeyboardMarkup]:
     s = get_s()
     txt = (
-        f"⚙️ <b>الإعدادات</b>\n\n"
+        "⚙️ <b>الإعدادات</b>\n\n"
         f"• الكلمة المفتاحية: <code>{_esc(s.get('trigger_word'))}</code>\n"
         f"• التحديد: {'عدة أزرار' if s.get('allows_multiple_answers') else 'زر واحد فقط'}\n"
         f"• تغيير التصويت: {'مسموح' if s.get('allows_revoting') else 'مقفل'}\n"
@@ -846,7 +868,8 @@ async def handle_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_shared(update, context)
         return
 
-    if act := context.user_data.get("act"):
+    act = context.user_data.get("act")
+    if act:
         t = (msg.text or "").strip()
         if t.lower() in ("/cancel", "الغاء", "إلغاء", "❌ إغلاق القائمة"):
             context.user_data.pop("act", None)
@@ -887,7 +910,8 @@ async def handle_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_local()
         await msg.reply_text(f"{'✅' if ok else '⚠️'} {info}")
         if ok and STATE.get("is_running") and str(STATE.get("default_channel_id")) == str(fc) and fm:
-            if c := STATE["channels"][str(fc)].get("candidates", {}).get(str(fm)):
+            c = STATE["channels"][str(fc)].get("candidates", {}).get(str(fm))
+            if c:
                 r = await process_post(context.bot, fc, fm, c["text"], _deser_ents(c.get("entities")), bool(c.get("is_media")), force=True)
                 if r == "added":
                     await msg.reply_text("✅ تم تعديل المنشور ووضع الأزرار عليه.")
@@ -937,11 +961,16 @@ async def handle_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def diag_report(bot, uid: int) -> str:
     me = await bot.get_me()
+    if LAST_SEEN:
+        seen_line = f"#{LAST_SEEN['msg_id']} ({_esc(LAST_SEEN['preview'])})"
+    else:
+        seen_line = "لم يصل بعد"
+
     out = [
         "🩺 <b>التشخيص الحي</b>",
         f"• البوت: @{_esc(me.username)} | الحالة: {'🟢 يعمل' if STATE.get('is_running') else '⏸ متوقف'} | Conflict: {CONFLICT_COUNT}",
         f"• الكلمة المفتاحية: <code>{_esc(get_s().get('trigger_word'))}</code>",
-        f"• آخر تحديث قناة: {f'#{LAST_SEEN[\"msg_id\"]} ({_esc(LAST_SEEN[\"preview\"])})' if LAST_SEEN else 'لم يصل بعد'}",
+        f"• آخر تحديث قناة: {seen_line}",
     ]
     if LAST_ERR:
         out.append(f"• آخر خطأ: <code>{_esc(LAST_ERR)}</code>")
@@ -989,18 +1018,21 @@ async def handle_panel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif act == "opts":
         await show_view(q.message, *opts_view(), edit=True)
     elif act == "oadd":
+        if len(s.get("button_options", [])) >= 12:
+            await q.message.reply_text("⚠️ وصلت للحد الأقصى (12 زراً).")
+            return
         context.user_data["act"] = {"t": "add"}
         await q.message.reply_text("➕ أرسل اسم الزر (أو كل زر في سطر)، أو /cancel.")
-    elif act == "oedit":
+    elif act == "oedit" and len(p) == 3:
         context.user_data["act"] = {"t": "edit", "i": int(p[2])}
         await q.message.reply_text("✏️ أرسل النص الجديد للزر، أو /cancel.")
-    elif act == "oup":
+    elif act == "oup" and len(p) == 3:
         i, o = int(p[2]), s["button_options"]
         if 1 <= i < len(o):
             o[i - 1], o[i] = o[i], o[i - 1]
             await save_local()
         await show_view(q.message, *opts_view(), edit=True)
-    elif act == "odel":
+    elif act == "odel" and len(p) == 3:
         i, o = int(p[2]), s["button_options"]
         if 0 <= i < len(o):
             o.pop(i)
@@ -1019,7 +1051,7 @@ async def handle_panel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif act == "ctrig":
         context.user_data["act"] = {"t": "trig"}
         await q.message.reply_text(f"🏷️ الحالية: <code>{_esc(s.get('trigger_word'))}</code>\nأرسل الجديدة أو /cancel:", parse_mode="HTML")
-    elif act == "ctog":
+    elif act == "ctog" and len(p) == 3:
         s[p[2]] = not bool(s.get(p[2], False))
         await save_local()
         await show_view(q.message, *cfg_view(), edit=True)
@@ -1029,23 +1061,32 @@ async def handle_panel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_view(q.message, *cfg_view(), edit=True)
     elif act == "chs":
         dch = STATE.get("default_channel_id")
-        rows = [[InlineKeyboardButton(f"{'✅ ' if str(dch)==k else '📢 '}{v.get('title',k)[:30]}", callback_data=f"p:sch:{k}")] for k, v in STATE.get("channels", {}).items()]
+        rows = []
+        for k, v in STATE.get("channels", {}).items():
+            mark = "✅ " if str(dch) == k else "📢 "
+            title = (v.get("title") or k)[:30]
+            rows.append([InlineKeyboardButton(f"{mark}{title}", callback_data=f"p:sch:{k}")])
         rows += [[InlineKeyboardButton("📲 جلب من قائمة تيليجرام", callback_data="p:pick")], [InlineKeyboardButton("🔙 رجوع", callback_data="p:home")]]
         await show_view(q.message, "📢 <b>اختر القناة الافتراضية:</b>", InlineKeyboardMarkup(rows), edit=True)
-    elif act == "sch":
+    elif act == "sch" and len(p) == 3:
         cid = int(p[2])
         STATE["default_channel_id"] = cid
-        if lg := STATE.get("channels", {}).get(str(cid), {}).get("linked_group_id"):
+        lg = STATE.get("channels", {}).get(str(cid), {}).get("linked_group_id")
+        if lg:
             STATE["default_group_id"] = int(lg)
         await sync_chat(context.bot, cid)
         await save_local()
         await show_panel(q.message, True)
     elif act == "grps":
         dgrp = STATE.get("default_group_id")
-        rows = [[InlineKeyboardButton(f"{'✅ ' if str(dgrp)==k else '💬 '}{v.get('title',k)[:30]}", callback_data=f"p:sgrp:{k}")] for k, v in STATE.get("known_groups", {}).items()]
+        rows = []
+        for k, v in STATE.get("known_groups", {}).items():
+            mark = "✅ " if str(dgrp) == k else "💬 "
+            title = (v.get("title") or k)[:30]
+            rows.append([InlineKeyboardButton(f"{mark}{title}", callback_data=f"p:sgrp:{k}")])
         rows += [[InlineKeyboardButton("🚫 بدون مجموعة", callback_data="p:sgrp:none")], [InlineKeyboardButton("📲 جلب من قائمة تيليجرام", callback_data="p:pick")], [InlineKeyboardButton("🔙 رجوع", callback_data="p:home")]]
         await show_view(q.message, "💬 <b>اختر المجموعة الافتراضية:</b>", InlineKeyboardMarkup(rows), edit=True)
-    elif act == "sgrp":
+    elif act == "sgrp" and len(p) == 3:
         STATE["default_group_id"] = None if p[2] == "none" else int(p[2])
         await save_local()
         await show_panel(q.message, True)
@@ -1219,7 +1260,8 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_local()
         return
 
-    if mg := getattr(msg, "media_group_id", None):
+    mg = getattr(msg, "media_group_id", None)
+    if mg:
         now = time.time()
         for k in [k for k, ts in SEEN_GROUPS.items() if now - ts > 600]:
             SEEN_GROUPS.pop(k, None)
@@ -1279,8 +1321,6 @@ def main():
     app.add_handler(CommandHandler(["start", "panel", "menu"], cmd_start))
     app.add_handler(CommandHandler(["cancel"], cmd_cancel))
     app.add_handler(ChatMemberHandler(on_my_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    if getattr(filters.StatusUpdate, "CHAT_SHARED", None) is not None:
-        app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.StatusUpdate.CHAT_SHARED, handle_shared))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_private))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, on_channel_post))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, on_group_msg))
