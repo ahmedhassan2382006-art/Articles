@@ -207,6 +207,18 @@ def _normalize_state(cfg: Any) -> Dict[str, Any]:
     cfg.setdefault("channels", {})
     cfg.setdefault("group_post_map", {})
 
+    # تنظيف أي سجلات استفتاء قديمة من النسخ السابقة حتى لا تعيق إضافة الأزرار
+    for ch_data in cfg.get("channels", {}).values():
+        if not isinstance(ch_data, dict):
+            continue
+        ch_data.pop("poll_msg_ids", None)
+        posts = ch_data.get("posts")
+        if isinstance(posts, dict):
+            for mk in list(posts.keys()):
+                pv = posts.get(mk)
+                if not isinstance(pv, dict) or "votes" not in pv:
+                    posts.pop(mk, None)
+
     defaults = _default_settings()
     settings = cfg.get("settings")
     if not isinstance(settings, dict):
@@ -686,12 +698,6 @@ def remove_group_data(group_id: int | str):
 async def inspect_chat_membership(
     bot, chat_id: int
 ) -> Tuple[str, bool, bool, bool, bool, str, str, Optional[int], Optional[int]]:
-    """
-    يرجع status_state كأحد القيم:
-    - "ok": البوت موجود في الدردشة
-    - "removed": البوت غير موجود / مطرود نهائياً
-    - "transient_error": خطأ مؤقت في الشبكة (لا نحذف القناة من s.json!)
-    """
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=bot.id)
         status = getattr(member, "status", "")
@@ -899,7 +905,7 @@ async def process_trigger_post(
     ch_data = get_or_init_channel(channel_id)
     posts = ch_data.setdefault("posts", {})
     m_key = str(msg_id)
-    if m_key in posts:
+    if m_key in posts and isinstance(posts[m_key], dict) and "votes" in posts[m_key]:
         return "already"
 
     trigger = settings.get("trigger_word", DEFAULT_TRIGGER_WORD)
@@ -949,7 +955,9 @@ async def process_trigger_post(
     return "added"
 
 
-async def _inspect_message_via_forward(bot, owner_id: int, channel_id: int, msg_id: int) -> Tuple[str, Optional[Any]]:
+async def _inspect_message_via_forward(
+    bot, owner_id: int, channel_id: int, msg_id: int, channel_is_protected: bool = False
+) -> Tuple[str, Optional[Any]]:
     for _ in range(3):
         try:
             fwd = await bot.forward_message(
@@ -967,8 +975,11 @@ async def _inspect_message_via_forward(bot, owner_id: int, channel_id: int, msg_
             await asyncio.sleep(int(getattr(ra, "retry_after", 2)) + 1)
         except BadRequest as e:
             err = str(e).lower()
-            if "protected content" in err or "can't be forwarded" in err:
+            if "protected content" in err or "chat_forwards_restricted" in err:
                 return "protected", None
+            if "can't be forwarded" in err or "message can't be forwarded" in err:
+                # إذا كانت القناة غير محمية فهذا يعني أن هذه الرسالة بالذات رسالة خدمة أو استفتاء غير قابل للتوجيه
+                return ("protected" if channel_is_protected else "unforwardable"), None
             if "message to forward not found" in err or "message_id_invalid" in err or "message not found" in err:
                 return "not_found", None
             return "error", None
@@ -981,23 +992,34 @@ async def _inspect_message_via_forward(bot, owner_id: int, channel_id: int, msg_
 
 async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] = None) -> Dict[str, Any]:
     """
-    يفحص منشورات القناة (من الأحدث للأقدم + استكشاف أحدث المنشورات).
-    يتخطى فقط المنشورات التي تم وضع الأزرار لها مسبقاً.
+    يفحص منشورات القناة الموجودة فعلياً (من الأحدث للأقدم + استكشاف أحدث المنشورات).
+    - يتحقق أولاً من إعدادات القناة الحقيقية لمعرفة هل الحماية مفعلة فعلاً أم لا.
+    - لا يتوقف عند رسائل الخدمة، ويحذف الرسائل المحذوفة من الكاش حتى لا يظهر عدد مبالغ فيه.
     """
     ch_data = get_or_init_channel(channel_id)
     last_id = int(ch_data.get("last_known_msg_id", 0) or 0)
     posts = ch_data.get("posts", {})
     candidates = ch_data.get("candidates", {})
 
+    is_protected_channel = False
+    try:
+        chat_obj = await bot.get_chat(channel_id)
+        is_protected_channel = bool(getattr(chat_obj, "has_protected_content", False))
+    except TelegramError:
+        pass
+
     scanned_count = 0
     added_count = 0
-    protected_hit = False
+    protected_hit = is_protected_channel
 
-    if owner_id:
+    # 1) استكشاف للأمام من last_id + 1 لاكتشاف أي منشورات جديدة لم تُرصد
+    if owner_id and not protected_hit:
         probe_start = last_id + 1 if last_id > 0 else 1
         consecutive_missing = 0
         for probe_id in range(probe_start, probe_start + 50):
-            st, fwd = await _inspect_message_via_forward(bot, owner_id, channel_id, probe_id)
+            st, fwd = await _inspect_message_via_forward(
+                bot, owner_id, channel_id, probe_id, channel_is_protected=is_protected_channel
+            )
             if st == "ok" and fwd:
                 last_id = probe_id
                 ch_data["last_known_msg_id"] = last_id
@@ -1013,6 +1035,11 @@ async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] =
                         _is_media_message(fwd),
                         is_album=bool(getattr(fwd, "media_group_id", None)),
                     )
+            elif st == "unforwardable":
+                # رسالة خدمة موجودة فعلاً، نحدّث last_id ونستمر
+                last_id = probe_id
+                ch_data["last_known_msg_id"] = last_id
+                consecutive_missing = 0
             elif st == "protected":
                 protected_hit = True
                 break
@@ -1020,7 +1047,7 @@ async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] =
                 consecutive_missing += 1
                 if consecutive_missing >= 15:
                     break
-            await asyncio.sleep(0.12)
+            await asyncio.sleep(0.1)
 
     if last_id <= 0:
         return {
@@ -1030,24 +1057,32 @@ async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] =
             "protected": protected_hit,
         }
 
+    # 2) فحص منشورات القناة الموجودة فعلياً من الأحدث إلى الأقدم
     for mid in range(last_id, 0, -1):
         m_key = str(mid)
-        if m_key in posts:
+        if m_key in posts and isinstance(posts[m_key], dict) and "votes" in posts[m_key]:
             continue
 
         if owner_id and not protected_hit:
-            st, fwd = await _inspect_message_via_forward(bot, owner_id, channel_id, mid)
+            st, fwd = await _inspect_message_via_forward(
+                bot, owner_id, channel_id, mid, channel_is_protected=is_protected_channel
+            )
             if st == "protected":
                 protected_hit = True
             elif st == "not_found":
+                # المنشور محذوف من القناة؛ نزيله من الكاش ولا نحسبه في الفحص
+                candidates.pop(m_key, None)
+                continue
+            elif st == "unforwardable":
+                # رسالة خدمة غير قابلة للتوجيه (مثل صورة القناة أو إنشاء القناة)، ليست منشوراً نصياً
                 continue
             elif st == "ok" and fwd:
-                scanned_count += 1
                 if getattr(fwd, "poll", None) is not None or is_service_message(fwd):
                     continue
                 raw_text = fwd.text if fwd.text is not None else (fwd.caption or "")
                 if not raw_text:
                     continue
+                scanned_count += 1
                 ents = fwd.entities if fwd.text is not None else fwd.caption_entities
                 res = await process_trigger_post(
                     bot=bot,
@@ -1064,22 +1099,24 @@ async def scan_all_channel_posts(bot, channel_id: int, owner_id: Optional[int] =
                 await asyncio.sleep(0.15)
                 continue
 
-        cand = candidates.get(m_key)
-        if cand:
-            scanned_count += 1
-            res = await process_trigger_post(
-                bot=bot,
-                channel_id=channel_id,
-                msg_id=mid,
-                raw_text=cand.get("text", ""),
-                entities=_deserialize_entities(cand.get("entities")),
-                is_media=bool(cand.get("is_media", False)),
-            )
-            if res == "added":
-                added_count += 1
-            elif res in ("forbidden", "no_options"):
-                break
-            await asyncio.sleep(0.12)
+        # فقط في حال كانت حماية المحتوى مفعلة فعلاً على القناة
+        if protected_hit:
+            cand = candidates.get(m_key)
+            if cand:
+                scanned_count += 1
+                res = await process_trigger_post(
+                    bot=bot,
+                    channel_id=channel_id,
+                    msg_id=mid,
+                    raw_text=cand.get("text", ""),
+                    entities=_deserialize_entities(cand.get("entities")),
+                    is_media=bool(cand.get("is_media", False)),
+                )
+                if res == "added":
+                    added_count += 1
+                elif res in ("forbidden", "no_options"):
+                    break
+                await asyncio.sleep(0.12)
 
     await save_local_now()
     return {
@@ -1613,6 +1650,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 if res == "added":
                     await msg.reply_text("✅ تم تعديل المنشور وإضافة الأزرار عليه بنجاح.")
+                elif res in ("error", "forbidden", "not_editable"):
+                    await msg.reply_text(f"⚠️ تعذر تعديل المنشور #{fwd_msg_id}: {LAST_PROCESS_ERROR or res}")
         await send_or_edit_panel(msg, edit=False)
         return
 
@@ -1711,39 +1750,48 @@ async def run_diagnostic_report(bot, owner_id: int) -> str:
         lines.append("\n❌ <b>لا توجد قناة افتراضية محددة!</b>\nاضغط «📲 جلب قناة/مجموعة من قائمة تيليجرام» لتحديد قناتك.")
     else:
         state_res, is_admin, can_post, can_edit, can_delete, ctype, title, _, _ = await inspect_chat_membership(bot, int(def_ch))
+        is_protected_channel = False
+        try:
+            chat_obj = await bot.get_chat(int(def_ch))
+            is_protected_channel = bool(getattr(chat_obj, "has_protected_content", False))
+        except TelegramError:
+            pass
+
         lines.append(f"\n📢 <b>القناة الافتراضية:</b> {_html_escape(title or str(def_ch))} (<code>{def_ch}</code>)")
         lines.append(f"• الحالة: {'✅ موجود' if state_res == 'ok' else '⚠️ ' + state_res} | مشرف: {'✅' if is_admin else '❌'}")
         lines.append(f"• تعديل رسائل الآخرين (للتعديل وإضافة الأزرار): {'✅' if can_edit else '❌'}")
         lines.append(f"• نشر: {'✅' if can_post else '❌'} | حذف: {'✅' if can_delete else '❌'}")
+        lines.append(f"• حماية المحتوى في إعدادات القناة: {'⚠️ مفعّلة (تمنع قراءة المنشورات السابقة)' if is_protected_channel else '✅ غير مفعّلة'}")
 
         ch_data = STATE.get("channels", {}).get(str(def_ch), {})
         last_id = int(ch_data.get("last_known_msg_id", 0) or 0)
         lines.append(f"• آخر رقم منشور مسجل: <code>{last_id}</code>")
+        lines.append(f"• منشورات عليها أزرار حالياً: {len(ch_data.get('posts', {}))}")
 
-        probe_start = max(1, last_id)
-        found_id = 0
-        found_preview = ""
-        prot_note = ""
-        for pid in range(probe_start, probe_start + 15):
-            st, fwd = await _inspect_message_via_forward(bot, owner_id, int(def_ch), pid)
-            if st == "ok" and fwd:
-                found_id = pid
-                txt = (fwd.text or fwd.caption or "[وسائط بدون نص]")
-                found_preview = txt[:60]
-            elif st == "protected":
-                prot_note = "⚠️ حماية المحتوى مفعّلة في القناة."
-                break
-            await asyncio.sleep(0.1)
+        if not is_protected_channel:
+            probe_start = max(1, last_id)
+            found_id = 0
+            found_preview = ""
+            for pid in range(probe_start, probe_start + 15):
+                st, fwd = await _inspect_message_via_forward(bot, owner_id, int(def_ch), pid, channel_is_protected=False)
+                if st == "ok" and fwd:
+                    found_id = pid
+                    txt = (fwd.text or fwd.caption or "[وسائط بدون نص]")
+                    found_preview = txt[:60]
+                elif st == "protected":
+                    is_protected_channel = True
+                    break
+                await asyncio.sleep(0.1)
 
-        if found_id > 0:
-            if found_id > last_id:
-                ch_data["last_known_msg_id"] = found_id
-                await save_local_now()
-            lines.append(f"• <b>اختبار قراءة أحدث منشور فعلي:</b> ✅ منشور #{found_id}: «{_html_escape(found_preview)}»")
-        elif prot_note:
-            lines.append(f"• {prot_note}")
-        else:
-            lines.append("• <b>اختبار القراءة:</b> تعذر العثور على منشورات حول الرقم المسجل. أعد توجيه آخر منشور من القناة إلى هنا.")
+            if found_id > 0:
+                if found_id > last_id:
+                    ch_data["last_known_msg_id"] = found_id
+                    await save_local_now()
+                lines.append(f"• <b>اختبار قراءة أحدث منشور فعلي:</b> ✅ منشور #{found_id}: «{_html_escape(found_preview)}»")
+            elif is_protected_channel:
+                lines.append("• ⚠️ حماية المحتوى مفعّلة في القناة.")
+            else:
+                lines.append("• <b>اختبار القراءة:</b> تعذر العثور على منشورات حول الرقم المسجل. أعد توجيه آخر منشور من القناة إلى هنا.")
 
     return "\n".join(lines)
 
@@ -1972,7 +2020,7 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text("⚠️ أضف الأزرار أولاً من «🧩 إدارة الأزرار التفاعلية».")
             return
 
-        status_msg = await query.message.reply_text("🔍 جاري فحص كل منشورات القناة، برجاء الانتظار...")
+        status_msg = await query.message.reply_text("🔍 جاري فحص منشورات القناة، برجاء الانتظار...")
         res = await scan_all_channel_posts(
             context.bot,
             int(def_ch),
@@ -1986,14 +2034,15 @@ async def handle_panel_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
         else:
             extra = (
-                "\n⚠️ ملاحظة: القناة مفعّل فيها حماية المحتوى، لذا تم فحص المنشورات المخزنة فقط."
+                "\n⚠️ ملاحظة: خيار «حماية المحتوى / منع الحفظ والتوجيه» مفعّل في إعدادات قناتك؛ "
+                "تيليجرام يمنع البوتات من قراءة المنشورات السابقة في القنوات المحمية، لذا عطل الحماية مؤقتاً أو انشر منشوراً جديداً أثناء تشغيل البوت."
                 if res["protected"]
                 else ""
             )
             err_note = f"\n⚠️ آخر خطأ: {LAST_PROCESS_ERROR}" if LAST_PROCESS_ERROR else ""
             await status_msg.edit_text(
                 f"✅ اكتمل فحص منشورات القناة (حتى منشور رقم {res['last_id']}).\n"
-                f"• منشورات تم فحصها الآن: {res['scanned']}\n"
+                f"• منشورات موجودة تم فحصها الآن: {res['scanned']}\n"
                 f"• منشورات تبدأ بـ {trig} وتم تعديلها ووضع الأزرار عليها: {res['added']}{extra}{err_note}"
             )
         await send_or_edit_panel(query.message, edit=True)
@@ -2364,7 +2413,7 @@ async def on_post_init(app):
     except Exception as e:
         logger.warning(f"تنبيه delete_webhook: {e}")
     asyncio.create_task(background_loop(app))
-    logger.info("✅ تم تشغيل البوت الثاني بنجاح (تعديل نفس المنشور + أزرار تفاعلية + جلب القنوات والمجموعات).")
+    logger.info("✅ تم تشغيل البوت الثاني بنجاح.")
 
 
 def main():
