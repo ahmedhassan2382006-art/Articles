@@ -1,11 +1,35 @@
 {
-  "channels": {},
+  "channels": {
+    "-1002527184826": {
+      "title": "Sky Stars",
+      "linked_group_id": -1002383098026,
+      "linked_group_title": "⁨Sky Stars⁩ محادثة",
+      "can_post_messages": true,
+      "can_edit_messages": true,
+      "can_delete_messages": true,
+      "last_known_msg_id": 36,
+      "posts": {},
+      "candidates": {
+        "30": {
+          "text": "بجد مكنتش متخيل أني أقدر أعمله",
+          "entities": [],
+          "is_media": false,
+          "is_album": false
+        }
+      }
+    }
+  },
   "group_post_map": {},
   "owner_id": 6701042883,
-  "is_running": false,
-  "default_channel_id": null,
-  "default_group_id": null,
-  "known_groups": {},
+  "is_running": true,
+  "default_channel_id": -1002527184826,
+  "default_group_id": -1002383098026,
+  "known_groups": {
+    "-1002383098026": {
+      "title": "⁨Sky Stars⁩ محادثة",
+      "linked_channel_id": -1002527184826
+    }
+  },
   "settings": {
     "trigger_word": "$bot",
     "case_sensitive_trigger": false,
