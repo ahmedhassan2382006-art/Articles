@@ -1,0 +1,21 @@
+{
+  "owner_id": null,
+  "is_running": false,
+  "default_channel_id": null,
+  "default_group_id": null,
+  "known_groups": {},
+  "channels": {},
+  "group_post_map": {},
+  "settings": {
+    "trigger_word": "@like",
+    "case_sensitive_trigger": false,
+    "button_options": [
+      "👍 إعجاب",
+      "👎 عدم إعجاب"
+    ],
+    "allows_multiple_answers": false,
+    "allows_revoting": true,
+    "show_vote_counts": true,
+    "vertical_buttons": false
+  }
+}
