@@ -32,7 +32,7 @@
       "id": 1793802556,
       "name": "مصدر إخباري",
       "url": "https://aitnews.com/feed/",
-      "last_id": "https://aitnews.com/?p=609472",
+      "last_id": "https://aitnews.com/?p=609513",
       "topics": {
         "-1003924183926": 4060
       }
@@ -50,7 +50,7 @@
       "id": 1793810546,
       "name": "Softpedia Windows / All",
       "url": "https://www.softpedia.com/backend.xml",
-      "last_id": "https://www.softpedia.com/get/Programming/SDK-DDK/Sun-Java-JDK.shtml",
+      "last_id": "https://www.softpedia.com/get/Others/Signatures-Updates/Microsoft-Defender-Update-for-Windows-Operating-System-Installation-Images.shtml",
       "topics": {
         "-1003924183926": 4062
       }
@@ -59,7 +59,7 @@
       "id": 1793810597,
       "name": "MajorGeeks.Com",
       "url": "https://www.majorgeeks.com/files/rss",
-      "last_id": "50b4c477d598f24985ac7a8310e6061f1d3e47b8",
+      "last_id": "c8a54047d9406f391b9d664a61d171f259f1abd8",
       "topics": {
         "-1003924183926": 4063
       }
@@ -68,7 +68,7 @@
       "id": 1793810653,
       "name": "عرّفني",
       "url": "https://3arrafni.com/feed/",
-      "last_id": "https://3arrafni.com/tech-news/huawei-osta-o1-pro-preorders",
+      "last_id": "https://3arrafni.com/tech-news/optimizely-hack-crypto-stealing-code",
       "topics": {
         "-1003924183926": 4064
       }
@@ -86,7 +86,7 @@
       "id": 1793811206,
       "name": "TechCrunch",
       "url": "https://techcrunch.com/feed/",
-      "last_id": "https://techcrunch.com/?p=3189878",
+      "last_id": "https://techcrunch.com/?p=3189866",
       "topics": {
         "-1003924183926": 4066
       }
