@@ -90,6 +90,15 @@
       "topics": {
         "-1003924183926": 4066
       }
+    },
+    {
+      "id": 1795064259,
+      "name": "OpenAI News",
+      "url": "https://openai.com/news/rss.xml",
+      "last_id": "https://openai.com/index/the-silent-consensus",
+      "topics": {
+        "-1003924183926": 4834
+      }
     }
   ],
   "registered_chats": [
