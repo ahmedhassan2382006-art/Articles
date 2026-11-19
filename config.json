@@ -32,7 +32,7 @@
       "id": 1793802556,
       "name": "مصدر إخباري",
       "url": "https://aitnews.com/feed/",
-      "last_id": "https://aitnews.com/?p=609572",
+      "last_id": "https://aitnews.com/?p=609576",
       "topics": {
         "-1003924183926": 4060
       }
@@ -59,7 +59,7 @@
       "id": 1793810597,
       "name": "MajorGeeks.Com",
       "url": "https://www.majorgeeks.com/files/rss",
-      "last_id": "92739cbe83a4a8ecb7f5b59e4e5023e0b06598e1",
+      "last_id": "53dff138b88cab2983a3957ff436ca1a04e60399",
       "topics": {
         "-1003924183926": 4063
       }
@@ -131,7 +131,7 @@
       "id": 1795066813,
       "name": "Releases Archive - APKMirror",
       "url": "https://www.apkmirror.com/feed/",
-      "last_id": "http://www.apkmirror.com/?p=17373854",
+      "last_id": "http://www.apkmirror.com/?p=17374481",
       "topics": {
         "-1003924183926": 4902
       }
