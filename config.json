@@ -108,6 +108,15 @@
       "topics": {
         "-1003924183926": 4888
       }
+    },
+    {
+      "id": 1795066065,
+      "name": "Google DeepMind News",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "last_id": "https://deepmind.google/blog/introducing-gemini-4-neon/",
+      "topics": {
+        "-1003924183926": 4894
+      }
     }
   ],
   "registered_chats": [
