@@ -1,4 +1,4 @@
-name: Run Telegram RSS and Media Downloader Bot
+name: Run_Telegram RSS and Media Downloader Bot
 
 on:
   schedule:
