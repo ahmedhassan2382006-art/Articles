@@ -135,6 +135,15 @@
       "topics": {
         "-1003924183926": 4902
       }
+    },
+    {
+      "id": 1795066842,
+      "name": "F-Droid - Free and Open Source Android App Repository",
+      "url": "https://f-droid.org/en/feed.xml",
+      "last_id": "https://f-droid.org/2026/11/16/twif.html",
+      "topics": {
+        "-1003924183926": 4906
+      }
     }
   ],
   "registered_chats": [
