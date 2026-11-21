@@ -92,15 +92,6 @@
       }
     },
     {
-      "id": 1795065999,
-      "name": "OpenAI News",
-      "url": "https://openai.com/news/rss.xml",
-      "last_id": "https://openai.com/index/combatting-adversarial-distillation",
-      "topics": {
-        "-1003924183926": 4888
-      }
-    },
-    {
       "id": 1795066065,
       "name": "Google DeepMind News",
       "url": "https://deepmind.google/blog/rss.xml",
