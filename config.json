@@ -32,7 +32,7 @@
       "id": 1793802556,
       "name": "مصدر إخباري",
       "url": "https://aitnews.com/feed/",
-      "last_id": "https://aitnews.com/?p=609873",
+      "last_id": "https://aitnews.com/?p=609964",
       "topics": {
         "-1003924183926": 4060
       }
@@ -50,7 +50,7 @@
       "id": 1793810653,
       "name": "عرّفني",
       "url": "https://3arrafni.com/feed/",
-      "last_id": "https://3arrafni.com/tech-news/ios-27-3-beta-features-iphone-release-date",
+      "last_id": "https://3arrafni.com/tech-news/tawakkalna-shamel-ai-voice-assistant-2027",
       "topics": {
         "-1003924183926": 4064
       }
@@ -77,7 +77,7 @@
       "id": 1795066065,
       "name": "Google DeepMind News",
       "url": "https://deepmind.google/blog/rss.xml",
-      "last_id": "https://deepmind.google/blog/finding-faster-quantum-algorithms-with-agents-and-formal-verification/",
+      "last_id": "https://deepmind.google/blog/interpreting-mass-spectra-with-google-antigravity/",
       "topics": {
         "-1003924183926": 4894
       }
@@ -86,7 +86,7 @@
       "id": 1795066112,
       "name": "AppleVis: All Recent Posts",
       "url": "https://www.applevis.com/rss.xml",
-      "last_id": "node/43082",
+      "last_id": "node/43085",
       "topics": {
         "-1003924183926": 4898
       }
